@@ -192,31 +192,7 @@ export default function CheckoutPage() {
       nextOrderId = generateOrderId().replace('#', '');
     }
 
-    const orderPayload = {
-      orderId: nextOrderId,
-      customer: updatedForm,
-      items: items,
-      subtotal: subtotal,
-      shipping: shipping,
-      total: subtotal + shipping,
-      paymentStatus: 'PENDING',
-      orderStatus: 'PLACED',
-    };
-
-    try {
-      const orderRes = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(orderPayload),
-      });
-      const orderJson = await orderRes.json();
-      if (orderJson.success && orderJson.data?.orderId) {
-        nextOrderId = String(orderJson.data.orderId).replace('#', '');
-      }
-    } catch (err) {
-      console.error('Error creating pending order in DB:', err);
-    }
-
+    // Save order data in client store & local storage for payment completion
     createOrder(nextOrderId, items, subtotal, shipping, updatedForm);
 
     if (typeof window !== 'undefined') {

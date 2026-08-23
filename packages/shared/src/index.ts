@@ -72,6 +72,7 @@ export interface Order {
   status: OrderStatus;
   paymentStatus: PaymentStatus;
   createdAt: string;
+  isArchived?: boolean;
 }
 
 export interface Customer {

@@ -51,6 +51,7 @@ interface AdminOrder {
   screenshotUrl: string;
   createdAt: string;
   dateFormatted: string;
+  isArchived: boolean;
 }
 
 interface CategoryOption {
@@ -70,13 +71,14 @@ const ORDER_STATUSES = ['All', 'PLACED', 'CONFIRMED', 'PROCESSING', 'PACKED', 'S
 const SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
 
 const QUICK_TABS = [
-  { id: 'All', label: 'All Orders' },
+  { id: 'All', label: 'Active Orders' },
   { id: 'SUBMITTED', label: 'Pending Verification' },
   { id: 'VERIFIED', label: 'Payment Verified' },
   { id: 'CONFIRMED', label: 'Confirmed' },
   { id: 'SHIPPED', label: 'Shipped' },
   { id: 'DELIVERED', label: 'Delivered' },
   { id: 'CANCELLED', label: 'Cancelled' },
+  { id: 'ARCHIVED', label: '📦 Archived' },
 ];
 
 export default function OrdersPage() {
@@ -88,6 +90,7 @@ export default function OrdersPage() {
   const [activeTab, setActiveTab] = useState('All');
   const [search, setSearch] = useState('');
   const [showFilters, setShowFilters] = useState(false);
+  const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
 
   // Detailed Filters
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
@@ -130,7 +133,7 @@ export default function OrdersPage() {
     try {
       setLoading(true);
       const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch('/api/orders?limit=250&includePending=true', {
+      const res = await fetch('/api/orders?limit=250&includePending=true&archived=all', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (res.ok) {
@@ -180,16 +183,17 @@ export default function OrdersPage() {
                 day: 'numeric',
                 month: 'short',
                 year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
               }),
+              isArchived: Boolean(doc.isArchived),
             };
           });
           setOrders(mapped);
         }
+      } else {
+        showToast('Failed to load orders from database', true);
       }
-    } catch (e) {
-      console.error('Failed to load admin orders:', e);
+    } catch {
+      showToast('Error connecting to server', true);
     } finally {
       setLoading(false);
     }
@@ -345,14 +349,22 @@ export default function OrdersPage() {
           }
         }
 
-        // 2. Quick Tab Filter
-        if (activeTab !== 'All') {
-          if (activeTab === 'SUBMITTED' && order.paymentStatus !== 'SUBMITTED') return false;
-          if (activeTab === 'VERIFIED' && order.paymentStatus !== 'VERIFIED') return false;
-          if (activeTab === 'CONFIRMED' && order.orderStatus !== 'CONFIRMED' && order.paymentStatus !== 'VERIFIED') return false;
-          if (activeTab === 'SHIPPED' && order.orderStatus !== 'SHIPPED') return false;
-          if (activeTab === 'DELIVERED' && order.orderStatus !== 'DELIVERED') return false;
-          if (activeTab === 'CANCELLED' && order.orderStatus !== 'CANCELLED') return false;
+        // Archive Filter
+        if (activeTab === 'ARCHIVED') {
+          if (!order.isArchived) return false;
+        } else {
+          // In active tabs, hide archived orders
+          if (order.isArchived) return false;
+
+          // 2. Quick Tab Filter
+          if (activeTab !== 'All') {
+            if (activeTab === 'SUBMITTED' && order.paymentStatus !== 'SUBMITTED') return false;
+            if (activeTab === 'VERIFIED' && order.paymentStatus !== 'VERIFIED') return false;
+            if (activeTab === 'CONFIRMED' && order.orderStatus !== 'CONFIRMED' && order.paymentStatus !== 'VERIFIED') return false;
+            if (activeTab === 'SHIPPED' && order.orderStatus !== 'SHIPPED') return false;
+            if (activeTab === 'DELIVERED' && order.orderStatus !== 'DELIVERED') return false;
+            if (activeTab === 'CANCELLED' && order.orderStatus !== 'CANCELLED') return false;
+          }
         }
 
         // 3. Category / Type Filter
@@ -495,8 +507,10 @@ export default function OrdersPage() {
     const totalRevenue = filteredOrders.reduce((sum, o) => sum + o.total, 0);
     const totalUnits = filteredOrders.reduce((sum, o) => sum + o.totalQuantity, 0);
     const pendingVerifications = filteredOrders.filter((o) => o.paymentStatus === 'SUBMITTED').length;
-    return { totalRevenue, totalUnits, pendingVerifications };
-  }, [filteredOrders]);
+    const activeCount = orders.filter((o) => !o.isArchived).length;
+    const archivedCount = orders.filter((o) => o.isArchived).length;
+    return { totalRevenue, totalUnits, pendingVerifications, activeCount, archivedCount };
+  }, [filteredOrders, orders]);
 
   // Quick verify handler
   const handleQuickVerify = async (orderId: string, e: React.MouseEvent) => {
@@ -523,6 +537,84 @@ export default function OrdersPage() {
       }
     } catch {
       showToast('Error updating order status', true);
+    }
+  };
+
+  // Archive / Unarchive single order
+  const handleToggleArchive = async (docId: string, shouldArchive: boolean, e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    try {
+      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
+      const res = await fetch(`/api/orders/${docId}/archive`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ isArchived: shouldArchive }),
+      });
+
+      const json = await res.json();
+      if (res.ok && json.success) {
+        setOrders((prev) =>
+          prev.map((o) => (o.docId === docId || o.id === docId ? { ...o, isArchived: shouldArchive } : o))
+        );
+        if (previewOrder && (previewOrder.docId === docId || previewOrder.id === docId)) {
+          setPreviewOrder((prev) => (prev ? { ...prev, isArchived: shouldArchive } : null));
+        }
+        showToast(shouldArchive ? '📦 Order archived successfully!' : '📂 Order restored to active list!');
+      } else {
+        showToast(json.error || 'Failed to update archive status', true);
+      }
+    } catch {
+      showToast('Error connecting to server', true);
+    }
+  };
+
+  // Bulk Archive / Unarchive Handler
+  const handleBulkArchive = async (shouldArchive: boolean) => {
+    if (selectedOrders.length === 0) return;
+    try {
+      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
+      const res = await fetch('/api/orders/bulk-archive', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ orderIds: selectedOrders, isArchived: shouldArchive }),
+      });
+
+      const json = await res.json();
+      if (res.ok && json.success) {
+        setOrders((prev) =>
+          prev.map((o) => (selectedOrders.includes(o.docId) || selectedOrders.includes(o.id) ? { ...o, isArchived: shouldArchive } : o))
+        );
+        showToast(shouldArchive ? `📦 Archived ${selectedOrders.length} order(s)!` : `📂 Restored ${selectedOrders.length} order(s)!`);
+        setSelectedOrders([]);
+      } else {
+        showToast(json.error || 'Failed to bulk archive orders', true);
+      }
+    } catch {
+      showToast('Error connecting to server', true);
+    }
+  };
+
+  const toggleSelectOrder = (docId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setSelectedOrders((prev) =>
+      prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
+    );
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedOrders.length === filteredOrders.length && filteredOrders.length > 0) {
+      setSelectedOrders([]);
+    } else {
+      setSelectedOrders(filteredOrders.map((o) => o.docId || o.id));
     }
   };
 
@@ -689,10 +781,14 @@ export default function OrdersPage() {
       </div>
 
       {/* Aggregate KPI Badges */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
-          <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Filtered Orders</span>
-          <p className="text-2xl font-bold text-white font-mono">{filteredOrders.length}</p>
+          <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Active Orders</span>
+          <p className="text-2xl font-bold text-white font-mono">{aggregateMetrics.activeCount}</p>
+        </div>
+        <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
+          <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Filtered</span>
+          <p className="text-2xl font-bold text-cyan-400 font-mono">{filteredOrders.length}</p>
         </div>
         <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
           <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Total Value</span>
@@ -701,12 +797,12 @@ export default function OrdersPage() {
           </p>
         </div>
         <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
-          <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Total Units Sold</span>
-          <p className="text-2xl font-bold text-blue-400 font-mono">{aggregateMetrics.totalUnits} items</p>
+          <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Pending Verify</span>
+          <p className="text-2xl font-bold text-yellow-400 font-mono">{aggregateMetrics.pendingVerifications}</p>
         </div>
         <div className="bg-[#141414] border border-[#262626] rounded-xl p-4">
-          <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Pending Verification</span>
-          <p className="text-2xl font-bold text-yellow-400 font-mono">{aggregateMetrics.pendingVerifications}</p>
+          <span className="text-[11px] text-[#737373] font-mono uppercase block mb-1">Archived Orders</span>
+          <p className="text-2xl font-bold text-amber-400 font-mono">{aggregateMetrics.archivedCount}</p>
         </div>
       </div>
 
@@ -756,19 +852,37 @@ export default function OrdersPage() {
 
         {/* Quick Status Tabs */}
         <div className="flex overflow-x-auto pb-2 -mx-4 px-4 sm:mx-0 sm:px-0 hide-scrollbar gap-2">
-          {QUICK_TABS.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`whitespace-nowrap px-4 py-2 rounded-full text-xs font-mono font-bold transition-all cursor-pointer ${
-                activeTab === tab.id
-                  ? 'bg-electric-lime text-black shadow-[0_0_10px_rgba(210,240,0,0.3)]'
-                  : 'bg-[#141414] text-[#a3a3a3] hover:text-white border border-[#262626]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+          {QUICK_TABS.map((tab) => {
+            let tabCount = 0;
+            if (tab.id === 'All') tabCount = orders.filter((o) => !o.isArchived).length;
+            else if (tab.id === 'ARCHIVED') tabCount = orders.filter((o) => o.isArchived).length;
+            else if (tab.id === 'SUBMITTED') tabCount = orders.filter((o) => !o.isArchived && o.paymentStatus === 'SUBMITTED').length;
+            else if (tab.id === 'VERIFIED') tabCount = orders.filter((o) => !o.isArchived && o.paymentStatus === 'VERIFIED').length;
+            else tabCount = orders.filter((o) => !o.isArchived && o.orderStatus === tab.id).length;
+
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`whitespace-nowrap px-4 py-2 rounded-full text-xs font-mono font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeTab === tab.id
+                    ? tab.id === 'ARCHIVED'
+                      ? 'bg-amber-400 text-black shadow-[0_0_10px_rgba(251,191,36,0.3)]'
+                      : 'bg-electric-lime text-black shadow-[0_0_10px_rgba(210,240,0,0.3)]'
+                    : 'bg-[#141414] text-[#a3a3a3] hover:text-white border border-[#262626]'
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                    activeTab === tab.id ? 'bg-black/20 text-black' : 'bg-[#262626] text-gray-400'
+                  }`}
+                >
+                  {tabCount}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -1181,6 +1295,15 @@ export default function OrdersPage() {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-[#262626] bg-[#181818]">
+                  <th className="p-4 w-10 text-center">
+                    <input
+                      type="checkbox"
+                      checked={filteredOrders.length > 0 && selectedOrders.length === filteredOrders.length}
+                      onChange={toggleSelectAll}
+                      className="accent-electric-lime w-4 h-4 rounded cursor-pointer"
+                      title="Select all filtered orders"
+                    />
+                  </th>
                   <th className="p-4 text-xs font-mono text-[#737373] uppercase tracking-wider">Order</th>
                   <th className="p-4 text-xs font-mono text-[#737373] uppercase tracking-wider">Customer</th>
                   <th className="p-4 text-xs font-mono text-[#737373] uppercase tracking-wider">Items Breakdown</th>
@@ -1193,12 +1316,25 @@ export default function OrdersPage() {
               <tbody className="divide-y divide-[#262626]/80 text-sm">
                 {filteredOrders.map((order) => {
                   const firstItem = order.items[0];
+                  const isSelected = selectedOrders.includes(order.docId || order.id);
                   return (
                     <tr
                       key={order.docId || order.id}
-                      className="hover:bg-[#1a1a1a] transition-colors group cursor-pointer"
+                      className={`hover:bg-[#1a1a1a] transition-colors group cursor-pointer ${
+                        isSelected ? 'bg-electric-lime/5' : ''
+                      }`}
                       onClick={() => setPreviewOrder(order)}
                     >
+                      {/* Selection Checkbox */}
+                      <td className="p-4 align-top w-10 text-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={(e) => toggleSelectOrder(order.docId || order.id, e as unknown as React.MouseEvent)}
+                          className="accent-electric-lime w-4 h-4 rounded cursor-pointer mt-1"
+                        />
+                      </td>
+
                       {/* 1. Order ID & Date */}
                       <td className="p-4 align-top">
                         <div className="flex items-center gap-2">
@@ -1209,6 +1345,11 @@ export default function OrdersPage() {
                           >
                             #{order.id}
                           </Link>
+                          {order.isArchived && (
+                            <span className="inline-flex items-center gap-0.5 text-[9px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.2 rounded">
+                              ARCHIVED
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={(e) => {
@@ -1343,6 +1484,24 @@ export default function OrdersPage() {
                             </button>
                           )}
 
+                          {order.isArchived ? (
+                            <button
+                              onClick={(e) => handleToggleArchive(order.docId || order.id, false, e)}
+                              className="p-2 rounded-lg bg-amber-500/15 text-amber-300 hover:bg-amber-500 hover:text-black border border-amber-500/30 transition-all cursor-pointer"
+                              title="Restore to Active Orders"
+                            >
+                              <span className="material-symbols-outlined text-[18px]">unarchive</span>
+                            </button>
+                          ) : (
+                            <button
+                              onClick={(e) => handleToggleArchive(order.docId || order.id, true, e)}
+                              className="p-2 rounded-lg bg-[#262626] text-gray-400 hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/40 border border-transparent transition-all cursor-pointer"
+                              title="Archive Order"
+                            >
+                              <span className="material-symbols-outlined text-[18px]">archive</span>
+                            </button>
+                          )}
+
                           <Link
                             href={`/admin/orders/${order.docId}`}
                             className="inline-flex items-center justify-center p-2 rounded-lg bg-[#262626] text-white hover:bg-electric-lime hover:text-black transition-colors"
@@ -1375,6 +1534,43 @@ export default function OrdersPage() {
         )}
       </div>
 
+      {/* Floating Bulk Actions Bar */}
+      {selectedOrders.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-[#1a1a1a] border border-electric-lime/50 shadow-[0_10px_35px_rgba(0,0,0,0.9)] rounded-2xl px-5 py-3 flex items-center gap-4 animate-in slide-in-from-bottom-4 duration-200">
+          <div className="flex items-center gap-2 text-xs font-mono font-bold text-white">
+            <span className="w-2 h-2 rounded-full bg-electric-lime animate-pulse" />
+            <span>{selectedOrders.length} order{selectedOrders.length > 1 ? 's' : ''} selected</span>
+          </div>
+
+          <div className="h-4 w-px bg-[#333]" />
+
+          {activeTab === 'ARCHIVED' ? (
+            <button
+              onClick={() => handleBulkArchive(false)}
+              className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-black text-xs font-mono font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-sm">unarchive</span>
+              <span>Restore Selected</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => handleBulkArchive(true)}
+              className="px-3.5 py-1.5 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-black border border-amber-500/40 text-xs font-mono font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-sm">archive</span>
+              <span>Archive Selected</span>
+            </button>
+          )}
+
+          <button
+            onClick={() => setSelectedOrders([])}
+            className="text-xs font-mono text-gray-400 hover:text-white underline cursor-pointer"
+          >
+            Deselect
+          </button>
+        </div>
+      )}
+
       {/* ── QUICK ORDER PREVIEW MODAL ─────────────────────────── */}
       {previewOrder && (
         <div
@@ -1388,8 +1584,13 @@ export default function OrdersPage() {
             {/* Modal Header */}
             <div className="flex justify-between items-start border-b border-[#262626] pb-4">
               <div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                   <h3 className="text-2xl font-bold font-mono text-white">#{previewOrder.id}</h3>
+                  {previewOrder.isArchived && (
+                    <span className="px-2.5 py-0.5 rounded text-xs font-bold font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      📦 ARCHIVED
+                    </span>
+                  )}
                   <span className={`px-2.5 py-0.5 rounded text-xs font-bold font-mono border ${getPaymentBadgeColor(previewOrder.paymentStatus)}`}>
                     {previewOrder.paymentStatus}
                   </span>
@@ -1498,19 +1699,42 @@ export default function OrdersPage() {
             </div>
 
             {/* Modal Actions */}
-            <div className="flex gap-3 pt-2 border-t border-[#262626]">
+            <div className="flex flex-wrap gap-3 pt-2 border-t border-[#262626]">
               {previewOrder.paymentStatus === 'SUBMITTED' && (
                 <button
                   onClick={(e) => {
                     handleQuickVerify(previewOrder.docId || previewOrder.id, e);
                     setPreviewOrder(null);
                   }}
-                  className="flex-1 bg-green-500 hover:bg-green-400 text-black font-mono font-bold text-xs py-3 rounded-xl uppercase transition-colors flex items-center justify-center gap-1.5"
+                  className="flex-1 bg-green-500 hover:bg-green-400 text-black font-mono font-bold text-xs py-3 rounded-xl uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-base">check_circle</span>
                   Verify Payment & Confirm
                 </button>
               )}
+
+              {previewOrder.isArchived ? (
+                <button
+                  onClick={(e) => {
+                    handleToggleArchive(previewOrder.docId || previewOrder.id, false, e);
+                  }}
+                  className="px-4 py-3 bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-black border border-amber-500/40 font-mono font-bold text-xs rounded-xl uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">unarchive</span>
+                  Restore
+                </button>
+              ) : (
+                <button
+                  onClick={(e) => {
+                    handleToggleArchive(previewOrder.docId || previewOrder.id, true, e);
+                  }}
+                  className="px-4 py-3 bg-[#262626] hover:bg-amber-500 text-gray-300 hover:text-black font-mono font-bold text-xs rounded-xl uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-base">archive</span>
+                  Archive
+                </button>
+              )}
+
               <Link
                 href={`/admin/orders/${previewOrder.docId}`}
                 className="flex-1 bg-electric-lime hover:bg-white text-black font-mono font-bold text-xs py-3 rounded-xl uppercase transition-colors text-center flex items-center justify-center gap-1.5"

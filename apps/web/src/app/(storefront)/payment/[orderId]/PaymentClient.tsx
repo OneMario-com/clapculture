@@ -149,39 +149,38 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
       }
     }
 
-    // 2. Submit payment proof to existing order via PATCH
+    // 2. Submit payment and register official order in database
     try {
-      const patchRes = await fetch(`/api/orders/${cleanOrderId}/payment`, {
-        method: 'PATCH',
+      const orderPayload = {
+        orderId: formattedOrderId,
+        customer: order?.customer || checkoutInfo,
+        items: order?.items || [],
+        subtotal: order?.subtotal || total,
+        shipping: order?.shipping || 0,
+        total: order?.total || total,
+        paymentStatus: 'SUBMITTED',
+        orderStatus: 'PLACED',
+        transactionId: utrNumber.trim(),
+        screenshotUrl: uploadedScreenshotUrl || undefined,
+      };
+
+      const res = await fetch('/api/orders', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          transactionId: utrNumber.trim(),
-          screenshotUrl: uploadedScreenshotUrl || undefined,
-          customer: order?.customer,
-        }),
+        body: JSON.stringify(orderPayload),
       });
-      
-      if (!patchRes.ok && order) {
-        // Fallback: If document was not yet in DB, create it with REAL customer info
-        await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orderId: formattedOrderId,
-            customer: order.customer,
-            items: order.items,
-            subtotal: order.subtotal || total,
-            shipping: order.shipping || 0,
-            total: order.total || total,
-            paymentStatus: 'SUBMITTED',
-            orderStatus: 'PLACED',
-            transactionId: utrNumber.trim(),
-            screenshotUrl: uploadedScreenshotUrl || undefined,
-          }),
-        });
+
+      const resJson = await res.json();
+      if (!res.ok || !resJson.success) {
+        setErrors((prev) => ({ ...prev, utr: resJson.error || 'Failed to submit payment. Please verify your UTR.' }));
+        setIsSubmitting(false);
+        return;
       }
     } catch (err) {
-      console.error('Error updating payment proof:', err);
+      console.error('Error submitting order to database:', err);
+      setErrors((prev) => ({ ...prev, utr: 'Network error. Please try submitting again.' }));
+      setIsSubmitting(false);
+      return;
     }
 
     if (order) {
@@ -193,7 +192,7 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
     setTimeout(() => {
       setIsSubmitting(false);
       router.push(`/order-success/${formattedOrderId}`);
-    }, 400);
+    }, 300);
   };
 
   return (

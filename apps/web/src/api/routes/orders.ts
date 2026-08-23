@@ -27,12 +27,15 @@ orders.get('/next-id', async (c) => {
   }
 });
 
+// Create or update an order
+// RULE: Customer orders are strictly created ONLY once payment details (12-digit UTR + screenshot) are submitted!
 orders.post('/', async (c) => {
   try {
     const body = await c.req.json();
     const env = getEnv(c);
     const { databases } = getAppwriteClient(env);
     const dbId = getDbId(c);
+    const isAdmin = isAdminRequest(c);
     
     let customOrderId = (body.orderId || '').replace('#', '').trim();
     let existingDocId: string | null = null;
@@ -59,14 +62,37 @@ orders.post('/', async (c) => {
     const customerStr = JSON.stringify(customerObj);
     const itemsStr = typeof body.items === 'string' ? body.items : JSON.stringify(body.items || []);
 
-    // When paymentStatus is SUBMITTED, UTR is mandatory
+    // ── STRICT VALIDATION: Storefront orders require valid payment details ──
+    if (!isAdmin) {
+      if (body.paymentStatus === 'PENDING') {
+        return c.json({
+          success: false,
+          error: 'Orders are only registered after payment details (UTR and screenshot) are submitted.'
+        }, 400);
+      }
+
+      const cleanTxn = String(body.transactionId || '').replace(/\D/g, '');
+      if (!cleanTxn || cleanTxn.length < 12) {
+        return c.json({
+          success: false,
+          error: 'A valid 12-digit UTR / Reference number is required to place an order.'
+        }, 400);
+      }
+
+      if (!body.screenshotUrl && !customerObj.screenshotUrl && !customerObj.paymentProof) {
+        return c.json({
+          success: false,
+          error: 'Payment screenshot is required to complete order placement.'
+        }, 400);
+      }
+    }
+
     let transactionId = body.transactionId || 'UPI-REF-PENDING';
     if (body.paymentStatus === 'SUBMITTED') {
       const cleanTxn = String(body.transactionId || '').replace(/\D/g, '');
-      if (!cleanTxn || cleanTxn.length < 12) {
-        return c.json({ success: false, error: 'A valid 12-digit UTR / Reference number is required to submit payment.' }, 400);
+      if (cleanTxn && cleanTxn.length >= 12) {
+        transactionId = cleanTxn;
       }
-      transactionId = cleanTxn;
     }
 
     const orderData: Record<string, unknown> = {
@@ -76,10 +102,11 @@ orders.post('/', async (c) => {
       subtotal: Number(body.subtotal) || Number(body.total) || 0,
       shipping: Number(body.shipping) || 0,
       total: Number(body.total) || 0,
-      paymentStatus: body.paymentStatus || 'PENDING',
+      paymentStatus: body.paymentStatus || 'SUBMITTED',
       orderStatus: body.orderStatus || 'PLACED',
       transactionId: transactionId,
       trackingNumber: body.trackingNumber || 'TRK-CLAP-PENDING',
+      isArchived: body.isArchived !== undefined ? Boolean(body.isArchived) : false,
     };
     
     let response;
@@ -266,6 +293,84 @@ orders.patch('/:orderId/payment', async (c) => {
   }
 });
 
+// Single Order Archive Toggle
+orders.patch('/:orderId/archive', adminAuth, async (c) => {
+  try {
+    const rawId = c.req.param('orderId') || '';
+    const cleanId = rawId.replace('#', '').trim();
+    const body = await c.req.json().catch(() => ({}));
+    const isArchived = body.isArchived !== undefined ? Boolean(body.isArchived) : true;
+    const { databases } = getAppwriteClient(getEnv(c));
+    const dbId = getDbId(c);
+
+    let targetDocId = cleanId;
+    try {
+      await databases.getDocument(dbId, 'orders', targetDocId);
+    } catch {
+      const list = await databases.listDocuments(dbId, 'orders', [
+        Query.equal('orderId', cleanId),
+        Query.limit(1)
+      ]);
+      if (list.documents.length > 0) {
+        targetDocId = list.documents[0].$id;
+      }
+    }
+
+    const response = await databases.updateDocument(
+      dbId,
+      'orders',
+      targetDocId,
+      { isArchived }
+    );
+
+    return c.json({ success: true, data: enrichOrderDoc(response) });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Failed to toggle archive status';
+    return c.json({ success: false, error: msg }, 500);
+  }
+});
+
+// Bulk Order Archive / Unarchive
+orders.post('/bulk-archive', adminAuth, async (c) => {
+  try {
+    const { orderIds, isArchived } = await c.req.json();
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return c.json({ success: false, error: 'No orders provided for archiving' }, 400);
+    }
+    const archiveFlag = isArchived !== undefined ? Boolean(isArchived) : true;
+    const { databases } = getAppwriteClient(getEnv(c));
+    const dbId = getDbId(c);
+
+    const results = await Promise.allSettled(
+      orderIds.map(async (id: string) => {
+        const cleanId = id.replace('#', '').trim();
+        let targetDocId = cleanId;
+        try {
+          await databases.getDocument(dbId, 'orders', targetDocId);
+        } catch {
+          const list = await databases.listDocuments(dbId, 'orders', [
+            Query.equal('orderId', cleanId),
+            Query.limit(1)
+          ]);
+          if (list.documents.length > 0) {
+            targetDocId = list.documents[0].$id;
+          }
+        }
+        return databases.updateDocument(dbId, 'orders', targetDocId, { isArchived: archiveFlag });
+      })
+    );
+
+    return c.json({
+      success: true,
+      message: `Updated archive status for ${results.length} orders`,
+      isArchived: archiveFlag,
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Failed to bulk archive orders';
+    return c.json({ success: false, error: msg }, 500);
+  }
+});
+
 orders.get('/track', async (c) => {
   try {
     const orderId = c.req.query('orderId');
@@ -320,6 +425,7 @@ function enrichOrderDoc(doc: Record<string, unknown>) {
   const screenshot = (customerObj.screenshotUrl || customerObj.paymentProof || doc.screenshotUrl || doc.paymentProof || '') as string;
   return {
     ...doc,
+    isArchived: Boolean(doc.isArchived),
     screenshotUrl: screenshot,
     paymentProof: screenshot,
   };
@@ -397,9 +503,6 @@ orders.get('/:orderId', async (c) => {
           return c.json({ success: false, error: 'You do not have permission to view this order.' }, 403);
         }
       }
-      // Note: We still allow access without contact param for the payment flow
-      // where the user just created the order and needs to view it immediately.
-      // The contact param is added by client pages to enforce isolation.
     }
     
     return c.json({ success: true, data: enrichOrderDoc(orderDoc) });
@@ -412,7 +515,7 @@ orders.get('/:orderId', async (c) => {
 orders.put('/:id/status', adminAuth, async (c) => {
   try {
     const idOrOrderId = (c.req.param('id') || '').replace('#', '').trim();
-    const { orderStatus, paymentStatus, trackingNumber } = await c.req.json();
+    const { orderStatus, paymentStatus, trackingNumber, isArchived } = await c.req.json();
     const env = getEnv(c);
     const { databases } = getAppwriteClient(env);
     const dbId = getDbId(c);
@@ -440,6 +543,7 @@ orders.put('/:id/status', adminAuth, async (c) => {
     if (orderStatus) updateData.orderStatus = orderStatus;
     if (paymentStatus) updateData.paymentStatus = paymentStatus;
     if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
+    if (isArchived !== undefined) updateData.isArchived = Boolean(isArchived);
     
     const response = await databases.updateDocument(
       dbId,
@@ -448,37 +552,46 @@ orders.put('/:id/status', adminAuth, async (c) => {
       updateData
     );
 
-    // Send corresponding transactional email on status change via Gmail SMTP
-    const customerObj = typeof (response as Record<string, unknown>).customer === 'string' 
-      ? JSON.parse((response as Record<string, unknown>).customer as string) 
-      : (((response as Record<string, unknown>).customer || {}) as Record<string, string | undefined>);
+    // Send emails based on status change
+    let customerObj: Record<string, unknown> = {};
+    if (typeof response.customer === 'string') {
+      try { customerObj = JSON.parse(response.customer); } catch {}
+    } else if (response.customer && typeof response.customer === 'object') {
+      customerObj = response.customer as Record<string, unknown>;
+    }
+    const customerEmail = customerObj.email as string;
+    const customerName = (customerObj.fullName || 'Valued Rebel') as string;
+    const itemsList = typeof response.items === 'string' ? JSON.parse(response.items) : (response.items || []);
 
-    if (customerObj.email) {
-      const orderIdStr = String(response.orderId || targetDocId).replace('#', '');
-      if (paymentStatus === 'VERIFIED') {
-        sendPaymentVerifiedEmail(env, {
-          toEmail: customerObj.email,
-          customerName: customerObj.fullName || 'Valued Rebel',
-          orderId: orderIdStr,
-          transactionId: String(response.transactionId || ''),
-        }).catch((e) => console.log('Payment verified email notice:', e.message));
-      } else if (orderStatus === 'SHIPPED') {
-        sendShippingUpdateEmail(env, {
-          toEmail: customerObj.email,
-          customerName: customerObj.fullName || 'Valued Rebel',
-          orderId: orderIdStr,
-          trackingNumber: trackingNumber || response.trackingNumber || 'TRK-CLAP-EXPRESS',
-        }).catch((e) => console.log('Shipping update email notice:', e.message));
-      } else if (orderStatus === 'DELIVERED') {
-        sendOrderDeliveredEmail(env, {
-          toEmail: customerObj.email,
-          customerName: customerObj.fullName || 'Valued Rebel',
-          orderId: orderIdStr,
-        }).catch((e) => console.log('Delivered email notice:', e.message));
-      }
+    if (customerEmail && paymentStatus === 'VERIFIED') {
+      sendPaymentVerifiedEmail(env, {
+        toEmail: customerEmail,
+        customerName,
+        orderId: String(response.orderId).replace('#', ''),
+        amount: Number(response.total) || 0,
+        transactionId: (response.transactionId || '') as string,
+      }).catch((e) => console.log('Payment verified email notice:', e.message));
+    }
+
+    if (customerEmail && orderStatus === 'SHIPPED') {
+      sendShippingUpdateEmail(env, {
+        toEmail: customerEmail,
+        customerName,
+        orderId: String(response.orderId).replace('#', ''),
+        trackingNumber: (response.trackingNumber || 'TRK-CLAP-PENDING') as string,
+        courierName: 'BlueDart / Delhivery Express',
+      }).catch((e) => console.log('Shipping update email notice:', e.message));
+    }
+
+    if (customerEmail && orderStatus === 'DELIVERED') {
+      sendOrderDeliveredEmail(env, {
+        toEmail: customerEmail,
+        customerName,
+        orderId: String(response.orderId).replace('#', ''),
+      }).catch((e) => console.log('Delivered email notice:', e.message));
     }
     
-    return c.json({ success: true, data: response });
+    return c.json({ success: true, data: enrichOrderDoc(response) });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Failed to update order status';
     return c.json({ success: false, error: msg }, 500);
@@ -491,8 +604,9 @@ orders.get('/', adminAuth, async (c) => {
     const dbId = getDbId(c);
     const status = c.req.query('status');
     const paymentStatus = c.req.query('paymentStatus');
+    const archived = c.req.query('archived'); // 'true', 'false', 'all'
     const includePending = c.req.query('includePending') === 'true';
-    const limit = parseInt(c.req.query('limit') || '50');
+    const limit = parseInt(c.req.query('limit') || '250');
     
     const queries = [Query.limit(limit), Query.orderDesc('$createdAt')];
     if (status) queries.push(Query.equal('orderStatus', status));
@@ -504,11 +618,20 @@ orders.get('/', adminAuth, async (c) => {
       queries
     );
 
-    // By default, exclude PENDING (unpaid) orders from admin views
-    // Only include them if explicitly requested with ?includePending=true
     let filteredDocs = response.documents;
+
+    // Archive Filtering
+    if (archived === 'true') {
+      filteredDocs = filteredDocs.filter((d) => Boolean(d.isArchived) === true);
+    } else if (archived === 'false' || !archived) {
+      if (archived !== 'all') {
+        filteredDocs = filteredDocs.filter((d) => Boolean(d.isArchived) !== true);
+      }
+    }
+
+    // By default, exclude PENDING (unpaid) orders from admin views
     if (!includePending && !paymentStatus) {
-      filteredDocs = response.documents.filter(
+      filteredDocs = filteredDocs.filter(
         (d) => (d as Record<string, unknown>).paymentStatus !== 'PENDING'
       );
     }

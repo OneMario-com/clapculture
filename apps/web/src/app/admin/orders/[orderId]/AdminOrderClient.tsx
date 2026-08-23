@@ -42,6 +42,7 @@ interface OrderDoc {
   screenshotUrl?: string;
   paymentProof?: string;
   $createdAt?: string;
+  isArchived?: boolean;
 }
 
 export default function AdminOrderClient({ orderId }: { orderId: string }) {
@@ -88,6 +89,35 @@ export default function AdminOrderClient({ orderId }: { orderId: string }) {
     setTimeout(() => loadOrder(), 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId]);
+
+  const handleToggleArchive = async () => {
+    if (!order) return;
+    setIsUpdating(true);
+    const targetState = !order.isArchived;
+    try {
+      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
+      const res = await fetch(`/api/orders/${order.$id || orderId}/archive`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ isArchived: targetState }),
+      });
+
+      const json = await res.json();
+      if (res.ok && json.success) {
+        setOrder((prev) => (prev ? { ...prev, isArchived: targetState } : null));
+        showToast(targetState ? '📦 Order archived successfully!' : '📂 Order restored to active list!');
+      } else {
+        showToast(json.error || 'Failed to update archive status', true);
+      }
+    } catch {
+      showToast('Network error while toggling archive status', true);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
 
   const handleVerifyPayment = async (status: 'VERIFIED' | 'REJECTED') => {
     setIsUpdating(true);
@@ -348,7 +378,14 @@ _Team CLAPCULTURE_ ⚡`;
         <div className="bg-[#141414] border border-[#262626] rounded-xl p-6 md:p-8">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-6 border-b border-[#262626]">
             <div>
-              <h1 className="text-2xl md:text-3xl font-bold font-mono text-white">ORDER #{cleanId}</h1>
+              <div className="flex items-center gap-3">
+                <h1 className="text-2xl md:text-3xl font-bold font-mono text-white">ORDER #{cleanId}</h1>
+                {order?.isArchived && (
+                  <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-0.5 rounded text-xs font-bold font-mono">
+                    📦 ARCHIVED
+                  </span>
+                )}
+              </div>
               <p className="text-xs text-[#737373] mt-1 font-mono">
                 Placed on {orderDate} via UPI Payment
               </p>
@@ -375,6 +412,21 @@ _Team CLAPCULTURE_ ⚡`;
               >
                 <span className="material-symbols-outlined text-base">verified</span>
                 {paymentStatus === 'VERIFIED' ? '✓ PAYMENT VERIFIED' : 'CONFIRM & VERIFY PAYMENT'}
+              </button>
+              <button
+                type="button"
+                disabled={isUpdating}
+                onClick={handleToggleArchive}
+                className={`font-bold px-4 py-2 rounded-lg text-xs transition-colors flex items-center gap-1.5 cursor-pointer ${
+                  order?.isArchived
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500 hover:text-black'
+                    : 'bg-[#262626] text-gray-300 hover:bg-amber-500 hover:text-black border border-[#333]'
+                }`}
+              >
+                <span className="material-symbols-outlined text-base">
+                  {order?.isArchived ? 'unarchive' : 'archive'}
+                </span>
+                {order?.isArchived ? 'RESTORE FROM ARCHIVE' : 'ARCHIVE ORDER'}
               </button>
               <button
                 type="button"
