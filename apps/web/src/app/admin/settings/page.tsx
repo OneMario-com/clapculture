@@ -18,7 +18,7 @@ export default function SettingsPage() {
   });
 
   const [paymentData, setPaymentData] = useState({
-    upiId: 'BHARATPE.8L0Y0E5R7K56484@fbpe',
+    upiId: '8639654299@ybl',
     qrCodeUrl: '/qrcode.png',
     instructions: 'Scan the QR code to pay using any UPI app. Share screenshot on WhatsApp.'
   });

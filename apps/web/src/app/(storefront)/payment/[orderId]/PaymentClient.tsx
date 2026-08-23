@@ -78,9 +78,9 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
   const [copiedUpi, setCopiedUpi] = useState(false);
   const [errors, setErrors] = useState<{ utr?: string; screenshot?: string }>({});
 
-  const upiId = 'BHARATPE.8L0Y0E5R7K56484@fbpe';
-  const upiIntentString = `upi://pay?pa=${upiId}&pn=JULLESWAR%20PENDY&am=${total}&cu=INR&tn=Order%20${formattedOrderId}`;
-  // Use the static BharatPe QR code image as primary display
+  const upiId = '8639654299@ybl';
+  const upiIntentString = `upi://pay?pa=${upiId}&pn=CLAPCULTURE&am=${total}&cu=INR&tn=Order%20${formattedOrderId}`;
+  // Use the static QR code image as primary display
   const qrCodeUrl = resolveImageUrl('/qrcode.png');
 
   const handleCopyUpi = () => {
