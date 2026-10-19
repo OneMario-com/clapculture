@@ -1,9 +1,18 @@
+// Cloudflare Workers deployment, built with the OpenNext adapter
+// (https://opennext.js.org/cloudflare). Build and deploy from the repo root
+// with `npm run build` and `npm run deploy`.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "clapculture-web",
-  "compatibility_date": "2026-08-13",
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
-  "pages_build_output_dir": ".vercel/output/static"
+  // Must match the Worker's name in the Cloudflare dashboard.
+  "name": "clapculture",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  }
 }

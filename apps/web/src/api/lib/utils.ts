@@ -54,9 +54,9 @@ export const getClientIp = (c: Context): string => {
   );
 };
 
-// Where @cloudflare/next-on-pages exposes the current request's context
-// (the same lookup its getRequestContext() helper performs).
-const CLOUDFLARE_REQUEST_CONTEXT = Symbol.for('__cloudflare-request-context__');
+// Where the OpenNext Cloudflare adapter exposes the current request's context
+// (the same lookup its getCloudflareContext() helper performs).
+const CLOUDFLARE_REQUEST_CONTEXT = Symbol.for('__cloudflare-context__');
 
 /**
  * Keep background work (emails, customer sync) alive after the response is sent.

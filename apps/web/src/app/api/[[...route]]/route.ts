@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { handle } from 'hono/vercel';
 import { configureCors } from '@/api/middleware/cors';
 
-export const runtime = 'edge';
 
 
 

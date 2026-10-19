@@ -1,16 +1,22 @@
 /**
  * Seed script: Populate Appwrite database with collections, categories, and homepage config.
  * Products are already seeded.
- * Run: node scripts/seed-database.mjs
+ * Run: node --env-file=.env scripts/seed-database.mjs
  */
 import { Client, Databases, ID, Query } from 'node-appwrite';
 
-const client = new Client();
-client.setEndpoint('https://sgp.cloud.appwrite.io/v1');
-client.setProject('6a7dfa97003713198186');
-client.setKey('standard_e2f2bd731db98197fc5ea400f32c5e385f8fec82f5d268886e21afbc8e3b712dfada49cc4d92ce4031da8dbc80ca87eb6582fc852d6c029720b53c320719ff92d1c61b0f89e3466fe654963116f18fadf4a43d1ce55847e66252379d09c2cacfbc488193dd542f468b8a150a3f337e20da30704ad771ed1ddeae0a1386c9ebc0');
+const { APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID, APPWRITE_API_KEY } = process.env;
+if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID || !APPWRITE_API_KEY) {
+  console.error('Set APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID and APPWRITE_API_KEY (e.g. node --env-file=.env scripts/seed-database.mjs).');
+  process.exit(1);
+}
 
-const DB_ID = 'clapculture_db';
+const client = new Client();
+client.setEndpoint(APPWRITE_ENDPOINT);
+client.setProject(APPWRITE_PROJECT_ID);
+client.setKey(APPWRITE_API_KEY);
+
+const DB_ID = process.env.APPWRITE_DATABASE_ID || 'clapculture_db';
 const db = new Databases(client);
 
 // ---------- Categories ----------
