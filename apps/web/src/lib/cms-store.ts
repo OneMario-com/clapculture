@@ -346,7 +346,7 @@ export const DEFAULT_HOMEPAGE_CMS: HomepageCMSData = {
           badge: 'SOLD OUT',
           badgeColor: 'crimson',
           imageUrl: 'aa-mockup1',
-          link: '/product/icon-star-aa-rule-oversized-tee',
+          link: '/product/pushpa-the-rule-drop-shoulder-tee',
           ctaText: 'SOLD OUT',
           price: 699,
           compareAtPrice: 1299,

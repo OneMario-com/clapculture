@@ -12,7 +12,7 @@
  */
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { Product, Collection, Category } from '@clapculture/shared';
 
 // ─── Build-version cache busting ─────────────────────────────────────
@@ -187,46 +187,50 @@ function ensureBootstrap(): Promise<BootstrapData | null> {
 }
 
 // ─── React hook ──────────────────────────────────────────────────────
+// localStorage is read once per page load; a stale entry would otherwise be re-parsed on every render.
+let localCacheChecked = false;
+
+function getBootstrapSnapshot(): BootstrapData | null {
+  if (!bootstrapData && !localCacheChecked) {
+    localCacheChecked = true;
+    const cached = readLocalCacheEntry();
+    if (cached) {
+      bootstrapData = cached.data;
+      bootstrapStoredAt = cached.storedAt;
+    }
+  }
+  return bootstrapData;
+}
+
+// The server never has cached data, so hydration must start from "no data" to match its HTML.
+const getServerBootstrapSnapshot = (): BootstrapData | null => null;
+
 export function useBootstrap(): { data: BootstrapData | null; loading: boolean; refetch: () => void } {
-  const [data, setData] = useState<BootstrapData | null>(() => bootstrapData || getLocalCache());
-  const [loading, setLoading] = useState(!data);
+  // useSyncExternalStore renders the server snapshot while hydrating and switches to the cached
+  // data right after. Reading localStorage in a useState initializer instead made a returning
+  // visitor's first render differ from the server HTML (React error #418) on every full page load.
+  const data = useSyncExternalStore(subscribeToBootstrap, getBootstrapSnapshot, getServerBootstrapSnapshot);
+  const [pending, setPending] = useState(true);
   const mountedRef = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
-
-    const listener = () => {
-      if (mountedRef.current && bootstrapData) {
-        setData(bootstrapData);
-        setLoading(false);
-      }
-    };
-    bootstrapListeners.push(listener);
-
     ensureBootstrap().then(() => {
-      if (mountedRef.current) {
-        setData(bootstrapData);
-        setLoading(false);
-      }
+      if (mountedRef.current) setPending(false);
     });
-
     return () => {
       mountedRef.current = false;
-      bootstrapListeners = bootstrapListeners.filter(fn => fn !== listener);
     };
   }, []);
 
   const refetch = useCallback(() => {
-    setLoading(true);
+    setPending(true);
     refreshBootstrap().then(() => {
-      if (mountedRef.current) {
-        setData(bootstrapData);
-        setLoading(false);
-      }
+      if (mountedRef.current) setPending(false);
     });
   }, []);
 
-  return { data, loading, refetch };
+  return { data, loading: pending && !data, refetch };
 }
 
 // ─── Typed data hooks (same API surface as before) ───────────────────
