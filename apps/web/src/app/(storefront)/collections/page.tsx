@@ -1,11 +1,45 @@
 'use client';
+/* eslint-disable @next/next/no-img-element */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import Link from 'next/link';
-import { useCollections } from '@/lib/use-api-data';
+import { useCollections, useProducts } from '@/lib/use-api-data';
+import { useHomepageCMS } from '@/lib/cms-store';
+import { resolveImageUrl } from '@/lib/utils';
 
 export default function CollectionsPage() {
   const { data: collections, loading } = useCollections();
+  const { data: products } = useProducts();
+  const { data: homepage } = useHomepageCMS();
+
+  // Cover image per collection slug: the image set in admin, else the homepage star
+  // tile that links to the collection (/shop?star=<slug>), else its first product's photo.
+  const coverImages = useMemo(() => {
+    const starImages = new Map<string, string>();
+    for (const section of homepage?.sections || []) {
+      if (section.type !== 'star_collection') continue;
+      for (const tile of section.tiles || []) {
+        const star = tile.link?.match(/[?&]star=([^&#]+)/)?.[1];
+        if (star && tile.imageUrl) starImages.set(decodeURIComponent(star), tile.imageUrl);
+      }
+    }
+
+    const productImages = new Map<string, string>();
+    for (const product of products) {
+      const raw = product as unknown as Record<string, unknown>;
+      if (!product.images[0]) continue;
+      productImages.set(product.id, product.images[0]);
+      if (typeof raw.$id === 'string') productImages.set(raw.$id, product.images[0]);
+    }
+
+    const covers = new Map<string, string>();
+    for (const collection of collections) {
+      const firstProductImage = collection.productIds.map((id) => productImages.get(id)).find(Boolean);
+      const source = collection.image || starImages.get(collection.slug) || firstProductImage;
+      if (source) covers.set(collection.slug, resolveImageUrl(source));
+    }
+    return covers;
+  }, [collections, products, homepage]);
 
   return (
     <div className="min-h-screen bg-deep-black text-white pt-24 pb-16 px-4 md:px-8 max-w-[1920px] mx-auto">
@@ -28,6 +62,7 @@ export default function CollectionsPage() {
 
             const colId = collection.id || (collection as unknown as Record<string, string>).$id || `col-${index}`;
             const productCount = collection.productIds?.length || 0;
+            const cover = coverImages.get(collection.slug);
 
             return (
               <Link 
@@ -39,7 +74,17 @@ export default function CollectionsPage() {
                 <div className="absolute inset-0 bg-linear-to-br from-charcoal via-black to-gray-900 group-hover:scale-105 transition-transform duration-700">
                   <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_center,var(--tw-gradient-stops))] from-electric-lime/20 via-transparent to-transparent"></div>
                 </div>
-                
+
+                {cover && (
+                  <img
+                    src={cover}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    className="absolute inset-0 w-full h-full object-cover object-top group-hover:scale-105 transition-transform duration-700"
+                  />
+                )}
+
                 <div className="absolute inset-0 p-8 flex flex-col justify-end bg-linear-to-t from-black/80 to-transparent">
                   <h2 className="font-headline-md text-3xl md:text-5xl uppercase group-hover:text-electric-lime transition-colors">{collection.name}</h2>
                   <div className="flex items-center gap-2 mt-2">
