@@ -91,6 +91,44 @@ export function calculateShipping(items: ShippableItem[], threshold = 999, defau
   return { fee: defaultFee, isFree: false, reason: 'standard' };
 }
 
+/** Discount code as configured in the admin Discounts page. */
+export interface DiscountRule {
+  code: string;
+  /** 'Percentage' | 'Flat' | 'Free Shipping' (older records may use 'PERCENTAGE' / 'FIXED'). */
+  type: string;
+  value: number;
+  minOrder?: number | null;
+}
+
+export interface DiscountResult {
+  eligible: boolean;
+  /** Amount taken off the order total (for free shipping: the shipping fee). */
+  amount: number;
+  reason?: string;
+}
+
+/**
+ * Discount rule shared by checkout (what the customer is shown and pays) and
+ * the order API (what gets recorded).
+ */
+export function calculateDiscount(rule: DiscountRule, subtotal: number, shippingFee: number): DiscountResult {
+  const minOrder = Number(rule.minOrder) || 0;
+  if (subtotal < minOrder) {
+    return { eligible: false, amount: 0, reason: `This code needs a minimum order of ₹${minOrder}.` };
+  }
+
+  const type = String(rule.type || '').toLowerCase();
+  const value = Math.max(0, Number(rule.value) || 0);
+
+  if (type.includes('ship')) {
+    return { eligible: true, amount: Math.max(0, shippingFee) };
+  }
+  if (type.startsWith('percent')) {
+    return { eligible: true, amount: Math.min(subtotal, Math.round((subtotal * Math.min(value, 100)) / 100)) };
+  }
+  return { eligible: true, amount: Math.min(subtotal, Math.round(value)) };
+}
+
 export interface OrderItem {
   id: string;
   productId: string;

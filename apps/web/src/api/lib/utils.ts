@@ -25,6 +25,26 @@ export const getEnv = (c: Context): AppwriteEnv => {
   return c.env && Object.keys(c.env).length > 0 ? (c.env as AppwriteEnv) : (process.env as AppwriteEnv);
 };
 
+/**
+ * Keep only a collection's real attributes from a request body. Appwrite
+ * rejects the whole write if it contains an unknown attribute (or a system
+ * field like $id), so stray fields sent by a form would silently break saves.
+ */
+export const pickFields = (body: unknown, fields: readonly string[]): Record<string, unknown> => {
+  const source = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const picked: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (source[field] !== undefined) picked[field] = source[field];
+  }
+  return picked;
+};
+
+/** Drop Appwrite system fields ($id, $createdAt, …) from a request body. */
+export const withoutSystemFields = (body: unknown): Record<string, unknown> => {
+  const source = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(source).filter(([key]) => !key.startsWith('$')));
+};
+
 export const getClientIp = (c: Context): string => {
   return (
     c.req.header('cf-connecting-ip') ||

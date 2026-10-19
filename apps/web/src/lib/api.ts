@@ -1,15 +1,13 @@
+import { adminFetch } from './admin-fetch';
+
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 async function fetchWithAuth(endpoint: string, options: RequestInit = {}) {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('adminToken') : null;
   const headers = new Headers(options.headers || {});
-  
   headers.set('Content-Type', 'application/json');
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
 
-  const response = await fetch(`${BASE_URL}${endpoint}`, {
+  // adminFetch adds the admin token and sends an expired session back to the login page
+  const response = await adminFetch(`${BASE_URL}${endpoint}`, {
     ...options,
     headers,
   });

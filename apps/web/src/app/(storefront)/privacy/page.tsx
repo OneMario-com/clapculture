@@ -117,9 +117,9 @@ export default function PrivacyPage() {
             <div className="bg-black/60 border border-red-500/30 rounded-lg p-4 mb-4">
               <span className="text-xs text-gray-400 font-mono uppercase block mb-1">Our Currently Designated Official UPI ID:</span>
               <span className="text-lg md:text-xl font-mono font-bold text-electric-lime select-all">
-                paytm.s1qzmi4@pty
+                8639654299@ybl
               </span>
-              <span className="text-xs text-gray-400 block mt-1">Associated with official payment collection via Paytm for Business</span>
+              <span className="text-xs text-gray-400 block mt-1">Associated with official payment collection via UPI</span>
             </div>
             <p className="text-xs md:text-sm text-gray-300 mb-2">
               CLAPCULTURE is not responsible for payments made to unauthorized UPI IDs, QR codes, bank accounts, or phone numbers. Always verify the published UPI ID before transferring money.

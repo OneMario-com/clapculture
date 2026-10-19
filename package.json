@@ -12,7 +12,6 @@
     "pages:build": "cd apps/web && npx @cloudflare/next-on-pages && node ../../scripts/apply-routes.js && (echo '_worker.js' > .vercel/output/static/.assetsignore || true)",
     "deploy": "npm run build && cd apps/web && wrangler pages deploy .vercel/output/static --project-name=clapculture",
     "deploy:pages": "npm run build && cd apps/web && wrangler pages deploy .vercel/output/static --project-name=clapculture",
-    "deploy:api": "cd apps/api && wrangler deploy",
     "db:setup": "node scripts/setup-db.js && node scripts/seed-admin.js",
     "db:seed": "node scripts/seed-admin.js",
     "email:verify": "node scripts/verify-smtp.js",

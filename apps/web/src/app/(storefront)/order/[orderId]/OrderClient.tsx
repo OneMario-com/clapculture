@@ -74,6 +74,10 @@ export default function OrderClient({ orderId }: { orderId: string }) {
   const customer: Partial<CheckoutInfo> = activeOrder?.customer || {};
 
   const total = Number(activeOrder?.total) || 0;
+  // Saved orders keep the discount inside the customer JSON; a local draft has it on the order.
+  const savedDiscount = customer as { discountCode?: string; discountAmount?: number };
+  const discountCode = activeOrder?.discountCode || savedDiscount.discountCode || '';
+  const discountAmount = Number(activeOrder?.discountAmount ?? savedDiscount.discountAmount) || 0;
   const paymentStatus = activeOrder?.paymentStatus || 'SUBMITTED';
   const orderDate = activeOrder?.createdAt ? new Date(activeOrder.createdAt) : null;
 
@@ -237,7 +241,12 @@ export default function OrderClient({ orderId }: { orderId: string }) {
 
           {/* Total Summary */}
           <div className="flex justify-between items-center pt-4 border-t border-[#262626]">
-            <span className="text-xs text-[#737373] font-mono">ALL TAXES INCLUDED</span>
+            <div className="text-xs text-[#737373] font-mono">
+              <p>ALL TAXES INCLUDED</p>
+              {discountAmount > 0 && (
+                <p className="text-electric-lime print-black-text mt-1">DISCOUNT {discountCode}: -{formatCurrency(discountAmount)}</p>
+              )}
+            </div>
             <div className="text-right">
               <span className="text-xs text-[#a3a3a3] font-mono">TOTAL PAID:</span>
               <p className="text-3xl font-headline-md text-electric-lime print-black-text">{formatCurrency(total)}</p>

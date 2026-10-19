@@ -129,6 +129,7 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
         customer: order.customer,
         items: order.items,
         total: order.total,
+        discountCode: order.discountCode || undefined,
         transactionId: utrNumber.trim(),
         screenshotUrl: uploadedScreenshotUrl,
       };

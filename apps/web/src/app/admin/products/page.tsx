@@ -4,6 +4,7 @@
 import Link from 'next/link';
 import { resolveImageUrl } from '@/lib/utils';
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin-fetch';
 
 interface AdminProduct {
   id: string;
@@ -36,10 +37,7 @@ export default function ProductsPage() {
     const load = async () => {
       try {
         setLoading(true);
-        const token = localStorage.getItem('adminToken');
-        const res = await fetch('/api/products?limit=100&includeHidden=true', {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const res = await adminFetch('/api/products?limit=100&includeHidden=true');
         if (res.ok && !cancelled) {
           const data = await res.json();
           if (data.success && Array.isArray(data.data)) {
@@ -84,13 +82,9 @@ export default function ProductsPage() {
     setProducts(prev => prev.map(p => p.id === productId ? { ...p, isActive: newIsActive } : p));
 
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch(`/api/products/${productId}`, {
+      const res = await adminFetch(`/api/products/${productId}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           isActive: newIsActive,
         }),

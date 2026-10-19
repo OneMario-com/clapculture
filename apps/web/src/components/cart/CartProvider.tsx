@@ -41,17 +41,21 @@ export function CartProvider({ children }: { children: ReactNode }) {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
 
-  // Load from localStorage only after component mounts on client
+  // Load from localStorage only after component mounts on client (deferred a
+  // tick, so the first client render matches the server-rendered empty cart)
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem('clapculture_cart');
-      if (stored) {
-        setItems(normalizeStoredCart(JSON.parse(stored)));
+    const timer = setTimeout(() => {
+      try {
+        const stored = localStorage.getItem('clapculture_cart');
+        if (stored) {
+          setItems(normalizeStoredCart(JSON.parse(stored)));
+        }
+      } catch (e) {
+        console.error('Failed to load cart from localStorage', e);
       }
-    } catch (e) {
-      console.error('Failed to load cart from localStorage', e);
-    }
-    setIsHydrated(true);
+      setIsHydrated(true);
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   // Save to localStorage only after initial client hydration

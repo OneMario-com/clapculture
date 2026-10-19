@@ -71,6 +71,8 @@ function TrackOrderContent() {
             transactionId: doc.transactionId,
             trackingNumber: doc.trackingNumber,
             createdAt: doc.$createdAt || new Date().toISOString(),
+            discountCode: parsedCustomer?.discountCode,
+            discountAmount: Number(parsedCustomer?.discountAmount) || undefined,
           };
 
           setDbOrder(mappedOrder);
@@ -402,6 +404,12 @@ function TrackOrderContent() {
                 ))}
               </div>
 
+              {Number(dbOrder.discountAmount) > 0 && (
+                <div className="flex justify-between items-center pt-2 text-xs">
+                  <span className="text-gray-400 font-label-caps">DISCOUNT ({dbOrder.discountCode}):</span>
+                  <span className="text-electric-lime font-mono">-{formatCurrency(Number(dbOrder.discountAmount))}</span>
+                </div>
+              )}
               <div className="flex justify-between items-center pt-2 text-sm">
                 <span className="text-gray-400 font-label-caps">TOTAL AMOUNT:</span>
                 <span className="font-bold text-electric-lime text-xl font-mono">

@@ -1,7 +1,7 @@
 'use client';
 
 import { useSyncExternalStore } from 'react';
-import { getBootstrapHomepage, subscribeToBootstrap } from './use-api-data';
+import { getBootstrapHomepage, setBootstrapHomepage, subscribeToBootstrap } from './use-api-data';
 
 export type AspectRatioType = 'portrait' | 'tall' | 'square' | 'landscape' | 'banner' | 'wide';
 
@@ -472,11 +472,14 @@ async function persistHomepageCMS(payload: HomepageCMSData): Promise<HomepageCMS
   }
 
   currentCMSData = payload;
+  lastSavedAt = Date.parse(payload.lastUpdated) || Date.now();
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch (e) {
     console.error('Failed to cache Homepage CMS in localStorage', e);
   }
+  // The cached bootstrap still holds the previous homepage; replace it so it can't be re-applied
+  setBootstrapHomepage(payload as unknown as Record<string, unknown>);
   window.dispatchEvent(new Event('homepage-cms-updated'));
   return { ok: true, data: payload };
 }
@@ -489,10 +492,14 @@ export function saveHomepageCMS(data: HomepageCMSData): Promise<HomepageCMSSaveR
 }
 
 export function resetHomepageCMS(): Promise<HomepageCMSSaveResult> {
-  return persistHomepageCMS(DEFAULT_HOMEPAGE_CMS);
+  // Stamped like any save so the reset copy counts as the newest one
+  return saveHomepageCMS(DEFAULT_HOMEPAGE_CMS);
 }
 
 let currentCMSData: HomepageCMSData = DEFAULT_HOMEPAGE_CMS;
+// lastUpdated (ms) of the copy this tab last saved; older bootstrap copies (e.g. from a CDN-cached
+// /api/bootstrap) must not replace it
+let lastSavedAt = 0;
 if (typeof window !== 'undefined') {
   currentCMSData = getHomepageCMS();
 }
@@ -510,6 +517,7 @@ function subscribeCMS(callback: () => void) {
   const updateFromBootstrap = () => {
     const bootstrapHomepage = getBootstrapHomepage();
     if (bootstrapHomepage && (bootstrapHomepage as Record<string, unknown>).sections) {
+      if (lastSavedAt && (Date.parse(String(bootstrapHomepage.lastUpdated || '')) || 0) < lastSavedAt) return;
       currentCMSData = bootstrapHomepage as unknown as HomepageCMSData;
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(bootstrapHomepage));

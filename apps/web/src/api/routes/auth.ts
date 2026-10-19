@@ -86,6 +86,11 @@ auth.post('/otp/send', async (c) => {
 // Verify Entered OTP
 auth.post('/otp/verify', async (c) => {
   try {
+    // Each code allows 5 guesses; this also caps guessing across many codes from one IP.
+    if (await isRateLimited(`otp-verify:ip:${getClientIp(c)}`, 20, OTP_SEND_WINDOW_SECONDS)) {
+      return c.json({ success: false, error: TOO_MANY_REQUESTS }, 429);
+    }
+
     const { email, purpose = 'LOGIN', otp } = await c.req.json();
 
     const cleanEmail = parseEmail(email);

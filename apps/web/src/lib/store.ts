@@ -27,6 +27,8 @@ export interface OrderData {
   createdAt: string;
   transactionId?: string;
   screenshotUrl?: string;
+  discountCode?: string;
+  discountAmount?: number;
   trackingNumber?: string;
 }
 
@@ -38,7 +40,14 @@ interface OrderStoreContextType {
 
   // Current order
   currentOrder: OrderData | null;
-  createOrder: (orderId: string, items: CartItem[], subtotal: number, shipping: number, customer: CheckoutInfo) => void;
+  createOrder: (
+    orderId: string,
+    items: CartItem[],
+    subtotal: number,
+    shipping: number,
+    customer: CheckoutInfo,
+    discount?: { code: string; amount: number } | null
+  ) => void;
   completeOrder: (draftOrderId: string, saved: Partial<OrderData> & { orderId: string }) => void;
   getOrder: (orderId: string) => OrderData | null;
 
@@ -137,14 +146,17 @@ export function OrderStoreProvider({ children }: { children: ReactNode }) {
     items: CartItem[],
     subtotal: number,
     shipping: number,
-    customer: CheckoutInfo
+    customer: CheckoutInfo,
+    discount?: { code: string; amount: number } | null
   ) => {
     const order: OrderData = {
       orderId,
       items,
       subtotal,
       shipping,
-      total: subtotal + shipping,
+      total: subtotal + shipping - (discount?.amount || 0),
+      discountCode: discount?.code,
+      discountAmount: discount?.amount,
       customer,
       paymentStatus: 'PENDING',
       orderStatus: 'PLACED',

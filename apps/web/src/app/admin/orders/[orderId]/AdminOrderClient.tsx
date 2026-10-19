@@ -25,6 +25,8 @@ interface OrderCustomer {
   pincode?: string;
   screenshotUrl?: string;
   paymentProof?: string;
+  discountCode?: string;
+  discountAmount?: number;
 }
 
 interface OrderDoc {
@@ -438,7 +440,7 @@ _Team CLAPCULTURE_ ⚡`;
           <div className="flex items-center gap-2">
             <span className="text-xs text-[#737373]">Live Status:</span>
             <span className="bg-electric-lime/10 text-electric-lime border border-electric-lime/20 px-3 py-1 rounded-full text-xs font-bold font-mono">
-              {orderStatus}
+              {order?.orderStatus || orderStatus}
             </span>
           </div>
         </div>
@@ -660,10 +662,15 @@ _Team CLAPCULTURE_ ⚡`;
                   <p className="text-2xl font-bold text-white mt-0.5">
                     {formatCurrency(order?.total || 0)}
                   </p>
+                  {Number(customer.discountAmount) > 0 && (
+                    <p className="text-xs text-electric-lime mt-1">
+                      Includes discount {customer.discountCode}: -{formatCurrency(Number(customer.discountAmount))}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <span className="text-xs text-[#737373] block">Payment Channel:</span>
-                  <p className="text-xs text-gray-300 mt-0.5">Direct UPI (paytm.s1qzmi4@pty)</p>
+                  <p className="text-xs text-gray-300 mt-0.5">Direct UPI (8639654299@ybl)</p>
                 </div>
               </div>
             </div>

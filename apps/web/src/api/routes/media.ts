@@ -43,8 +43,12 @@ media.get('/file/:id', async (c) => {
     
     const appwriteUrl = `${endpoint}/storage/buckets/${BUCKET_ID}/files/${id}/view?project=${projectId}`;
     
-    // Fetch from Appwrite Storage with Cloudflare cache headers
+    // Fetch from Appwrite Storage with Cloudflare cache headers. The API key lets
+    // this proxy serve files even when the bucket has no public read access
+    // (which also stops anyone from listing every uploaded file).
+    const apiKey = env.APPWRITE_API_KEY || process.env.APPWRITE_API_KEY || '';
     const res = await fetch(appwriteUrl, {
+      headers: apiKey ? { 'X-Appwrite-Project': projectId, 'X-Appwrite-Key': apiKey } : undefined,
       // @ts-expect-error Cloudflare specific options
       cf: {
         cacheEverything: true,

@@ -140,7 +140,7 @@ Where CLAPCULTURE specifically provides an official UPI payment option, customer
 
 Our currently designated official UPI ID is: 
 
-#### **paytm.s1qzmi4@pty** 
+#### **8639654299@ybl** 
 
 This UPI ID is associated with our official payment collection arrangement through **Paytm for Business** . 
 
@@ -296,7 +296,7 @@ CLAPCULTURE, do not make the payment until you have independently verified the r
 
 For the currently designated UPI payment option, the official UPI ID is: 
 
-#### **paytm.s1qzmi4@pty** 
+#### **8639654299@ybl** 
 
 Payments made to unauthorized payment destinations are not considered authorized payments to CLAPCULTURE. 
 

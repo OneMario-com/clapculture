@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element */
 import React from 'react';
 import Link from 'next/link';
 
@@ -12,7 +13,7 @@ export default function AboutPage() {
       {/* Hero */}
       <div className="relative w-full h-[60vh] flex items-center justify-center overflow-hidden">
         <div className="absolute inset-0 bg-charcoal">
-          <img src="https://picsum.photos/seed/about/1920/1080" alt="About ClapCulture" className="w-full h-full object-cover opacity-40 grayscale" />
+          <img src="/herobg1-desktop.png" alt="About ClapCulture" className="w-full h-full object-cover opacity-40 grayscale" />
         </div>
         <div className="relative z-10 text-center px-4">
           <h1 className="font-headline-xl text-6xl md:text-9xl uppercase text-electric-lime mix-blend-screen">WE ARE CLAPCULTURE</h1>

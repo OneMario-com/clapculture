@@ -1,4 +1,4 @@
-const { Client, Databases, Permission, Role, ID } = require('node-appwrite');
+const { Client, Databases } = require('node-appwrite');
 const fs = require('fs');
 const path = require('path');
 
@@ -27,7 +27,6 @@ const API_KEY = process.env.APPWRITE_API_KEY || '';
 const DATABASE_ID = process.env.APPWRITE_DATABASE_ID || 'clapculture_db';
 
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@clapculture.com';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'clapculture123';
 const ADMIN_NAME = process.env.ADMIN_NAME || 'ClapCulture Admin';
 
 console.log('⚡ CLAPCULTURE Admin Credentials Seeder');
@@ -68,12 +67,9 @@ async function seedAdmin() {
         DATABASE_ID,
         'customers',
         'admin_user_seed',
-        adminDoc,
-        [
-          Permission.read(Role.any()),
-          Permission.update(Role.any()),
-          Permission.delete(Role.any()),
-        ]
+        adminDoc
+        // No document permissions: only the server (API key) may read or change it.
+        // (Previously Role.any() let anyone on the internet read, edit or delete it.)
       );
       console.log('✅ Admin user document created in database.');
     } catch (e) {

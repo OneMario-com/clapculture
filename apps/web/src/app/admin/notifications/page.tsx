@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { adminFetch } from '@/lib/admin-fetch';
 
 type NotificationType = 'order' | 'payment' | 'stock' | 'system' | 'customer';
 
@@ -27,17 +28,11 @@ export default function NotificationsPage() {
     async function loadNotifications() {
       try {
         setLoading(true);
-        const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-        
         // 1. Fetch live orders
-        const ordersRes = await fetch('/api/orders?limit=50', {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const ordersRes = await adminFetch('/api/orders?limit=50');
 
         // 2. Fetch live products for stock alerts
-        const productsRes = await fetch('/api/products?limit=50', {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const productsRes = await adminFetch('/api/products?limit=50');
 
         const items: NotificationItem[] = [];
 

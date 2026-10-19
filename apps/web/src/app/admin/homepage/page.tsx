@@ -1363,7 +1363,7 @@ export default function HomepageCMSPage() {
                 <span className="text-xs font-mono text-[#a3a3a3] mb-2 self-start uppercase">Live Card Preview</span>
                 <div className="w-full relative aspect-4/5 bg-black rounded-xl overflow-hidden border border-[#333] flex flex-col justify-between p-5 shadow-2xl">
                   <img
-                    src={editingTile.tile.imageUrl || '6a7fa922002c9b023447'}
+                    src={resolveImageUrl(editingTile.tile.imageUrl || '6a7fa922002c9b023447')}
                     alt="Preview"
                     className="absolute inset-0 w-full h-full object-cover opacity-70"
                   />

@@ -4,6 +4,7 @@
 import Link from 'next/link';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { formatCurrency, resolveImageUrl } from '@/lib/utils';
+import { adminFetch } from '@/lib/admin-fetch';
 
 interface OrderItem {
   id?: string;
@@ -167,10 +168,21 @@ export default function OrdersPage() {
   const [verifyingIds, setVerifyingIds] = useState<string[]>([]);
   const verifyingRef = useRef<Set<string>>(new Set());
   const loadSeqRef = useRef(0);
+  // Rows patched locally (quick verify) with the load sequence current at the time: a list request
+  // already in flight then returns the row's older state, so the patch is re-applied over that response.
+  const rowPatchesRef = useRef<Map<string, { seq: number; row: AdminOrder }>>(new Map());
   const previewOrder = useMemo(
     () => (previewOrderId ? orders.find((o) => (o.docId || o.id) === previewOrderId) ?? null : null),
     [orders, previewOrderId]
   );
+  // Order numbers carried by more than one order (older data from a since-fixed numbering bug)
+  const duplicateOrderIds = useMemo(() => {
+    const counts = new Map<string, number>();
+    orders.forEach((o) => {
+      if (o.id) counts.set(o.id, (counts.get(o.id) || 0) + 1);
+    });
+    return new Set(Array.from(counts).filter(([, n]) => n > 1).map(([id]) => id));
+  }, [orders]);
   const [toast, setToast] = useState<{ show: boolean; msg: string; isError?: boolean }>({ show: false, msg: '' });
 
   const showToast = (msg: string, isError = false) => {
@@ -189,17 +201,21 @@ export default function OrdersPage() {
   const loadOrders = async () => {
     const seq = ++loadSeqRef.current;
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch('/api/orders?limit=250&includePending=true&archived=all', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
+      const res = await adminFetch('/api/orders?limit=250&includePending=true&archived=all');
       // Ignore out-of-order responses from older requests
       if (seq !== loadSeqRef.current) return;
       if (res.ok) {
         const data = await res.json();
         if (seq !== loadSeqRef.current) return;
         if (data.success && Array.isArray(data.data)) {
-          const mapped: AdminOrder[] = data.data.map((doc: Record<string, unknown>) => mapOrderDoc(doc));
+          const patches = rowPatchesRef.current;
+          const mapped: AdminOrder[] = data.data.map((doc: Record<string, unknown>) => {
+            const order = mapOrderDoc(doc);
+            const patch = patches.get(order.docId || order.id);
+            return patch && patch.seq === seq ? { ...order, ...patch.row } : order;
+          });
+          // Patches made before this request started are already part of its response
+          patches.clear();
           setOrders(mapped);
         }
       } else {
@@ -542,16 +558,12 @@ export default function OrdersPage() {
     verifyingRef.current.add(rowId);
     setVerifyingIds((prev) => [...prev, rowId]);
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
       const updates: Record<string, string> = { paymentStatus: 'VERIFIED' };
       // Only confirm a freshly placed order; never roll back one that is further along
       if (order.orderStatus === 'PLACED') updates.orderStatus = 'CONFIRMED';
-      const res = await fetch(`/api/orders/${encodeURIComponent(rowId)}/status`, {
+      const res = await adminFetch(`/api/orders/${encodeURIComponent(rowId)}/status`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
       });
       const json = await res.json().catch(() => null);
@@ -562,6 +574,8 @@ export default function OrdersPage() {
             ? mapOrderDoc(json.data as Record<string, unknown>)
             : { ...order, ...updates };
         setOrders((prev) => prev.map((o) => ((o.docId || o.id) === rowId ? { ...o, ...updated } : o)));
+        // Keep the patch if a list reload is in flight (its response predates this update)
+        rowPatchesRef.current.set(rowId, { seq: loadSeqRef.current, row: { ...order, ...updated } });
         showToast(`Order #${order.id} verified and confirmed!`);
       } else {
         showToast(json?.error || 'Failed to verify order', true);
@@ -581,13 +595,9 @@ export default function OrdersPage() {
       e.preventDefault();
     }
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch(`/api/orders/${docId}/archive`, {
+      const res = await adminFetch(`/api/orders/${docId}/archive`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ isArchived: shouldArchive }),
       });
 
@@ -618,13 +628,9 @@ export default function OrdersPage() {
     const targetIds = visibleSelectedIds;
     if (targetIds.length === 0) return;
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch('/api/orders/bulk-archive', {
+      const res = await adminFetch('/api/orders/bulk-archive', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orderIds: targetIds, isArchived: shouldArchive }),
       });
 
@@ -1390,6 +1396,14 @@ export default function OrdersPage() {
                               ARCHIVED
                             </span>
                           )}
+                          {duplicateOrderIds.has(order.id) && (
+                            <span
+                              className="inline-flex items-center gap-0.5 text-[9px] font-mono font-bold bg-red-500/20 text-red-300 border border-red-500/40 px-1.5 py-0.2 rounded"
+                              title={`Another order also uses #${order.id}. This one is document ${order.docId}.`}
+                            >
+                              DUPLICATE #
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={(e) => {
@@ -1403,6 +1417,9 @@ export default function OrdersPage() {
                           </button>
                         </div>
                         <p className="text-[11px] text-[#737373] font-mono mt-1">{order.dateFormatted}</p>
+                        {duplicateOrderIds.has(order.id) && (
+                          <p className="text-[10px] text-red-300/80 font-mono mt-0.5 break-all">Doc {order.docId}</p>
+                        )}
                       </td>
 
                       {/* 2. Customer Info */}
@@ -1630,6 +1647,14 @@ export default function OrdersPage() {
                   {previewOrder.isArchived && (
                     <span className="px-2.5 py-0.5 rounded text-xs font-bold font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40">
                       📦 ARCHIVED
+                    </span>
+                  )}
+                  {duplicateOrderIds.has(previewOrder.id) && (
+                    <span
+                      className="px-2.5 py-0.5 rounded text-xs font-bold font-mono bg-red-500/20 text-red-300 border border-red-500/40"
+                      title={`Another order also uses #${previewOrder.id}. This one is document ${previewOrder.docId}.`}
+                    >
+                      DUPLICATE # · {previewOrder.docId}
                     </span>
                   )}
                   <span className={`px-2.5 py-0.5 rounded text-xs font-bold font-mono border ${getPaymentBadgeColor(previewOrder.paymentStatus)}`}>

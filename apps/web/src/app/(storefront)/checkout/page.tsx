@@ -7,6 +7,7 @@ import { useCart } from '@/components/cart/CartProvider';
 import { useOrderStore, CheckoutInfo } from '@/lib/store';
 import { formatCurrency, resolveImageUrl } from '@/lib/utils';
 import Link from 'next/link';
+import { calculateDiscount, DiscountRule } from '@clapculture/shared';
 
 interface CountryCode {
   code: string;
@@ -71,7 +72,40 @@ export default function CheckoutPage() {
   const subtotal = getCartTotal();
   const shippingInfo = getShippingFee();
   const shipping = shippingInfo.fee;
-  const total = subtotal + shipping;
+  // Discount code: checked by the server, amount computed with the same shared
+  // rule the order API uses, so what's shown here is what gets recorded.
+  const [discountInput, setDiscountInput] = useState('');
+  const [discountRule, setDiscountRule] = useState<DiscountRule | null>(null);
+  const [discountError, setDiscountError] = useState('');
+  const [applyingDiscount, setApplyingDiscount] = useState(false);
+  const discountResult = discountRule ? calculateDiscount(discountRule, subtotal, shipping) : null;
+  const discountAmount = discountResult?.eligible ? discountResult.amount : 0;
+  const total = subtotal + shipping - discountAmount;
+
+  const handleApplyDiscount = async () => {
+    const code = discountInput.trim().toUpperCase();
+    if (!code) return;
+    setApplyingDiscount(true);
+    setDiscountError('');
+    try {
+      const res = await fetch('/api/discounts/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, subtotal, shipping }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json.success && json.data) {
+        setDiscountRule(json.data as DiscountRule);
+      } else {
+        setDiscountRule(null);
+        setDiscountError(json.error || 'This code is not valid.');
+      }
+    } catch {
+      setDiscountError('Could not check the code. Please try again.');
+    } finally {
+      setApplyingDiscount(false);
+    }
+  };
 
   // Click outside handlers
   useEffect(() => {
@@ -201,7 +235,8 @@ export default function CheckoutPage() {
     }
 
     // Save order data in client store & local storage for payment completion
-    createOrder(nextOrderId, items, subtotal, shipping, updatedForm);
+    const appliedDiscount = discountRule && discountAmount > 0 ? { code: discountRule.code, amount: discountAmount } : null;
+    createOrder(nextOrderId, items, subtotal, shipping, updatedForm, appliedDiscount);
 
     if (typeof window !== 'undefined') {
       try {
@@ -211,7 +246,9 @@ export default function CheckoutPage() {
           items: items,
           subtotal: subtotal,
           shipping: shipping,
-          total: subtotal + shipping,
+          total,
+          discountCode: appliedDiscount?.code,
+          discountAmount: appliedDiscount?.amount,
           paymentStatus: 'PENDING',
           orderStatus: 'PLACED',
         }));
@@ -485,6 +522,51 @@ export default function CheckoutPage() {
                 <span>SHIPPING</span>
                 <span>{shipping === 0 ? 'FREE' : formatCurrency(shipping)}</span>
               </div>
+              {discountRule && discountAmount > 0 && (
+                <div className="flex justify-between text-electric-lime">
+                  <span>DISCOUNT ({discountRule.code})</span>
+                  <span>-{formatCurrency(discountAmount)}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="mb-6">
+              {discountRule ? (
+                <div className="flex justify-between items-center text-xs border border-electric-lime/40 bg-electric-lime/10 p-3">
+                  <span className="font-bold text-electric-lime">
+                    CODE {discountRule.code} {discountResult?.eligible ? 'APPLIED' : 'NOT APPLICABLE'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => { setDiscountRule(null); setDiscountInput(''); }}
+                    className="text-gray-300 underline hover:text-white"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={discountInput}
+                    onChange={(e) => { setDiscountInput(e.target.value.toUpperCase()); setDiscountError(''); }}
+                    placeholder="Discount code"
+                    className="grow bg-deep-black border border-gray-700 p-3 text-sm text-white focus:outline-none focus:border-electric-lime uppercase"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleApplyDiscount}
+                    disabled={applyingDiscount || !discountInput.trim()}
+                    className="border border-white px-4 text-xs font-bold uppercase hover:bg-white hover:text-black transition-colors disabled:opacity-50"
+                  >
+                    {applyingDiscount ? '...' : 'APPLY'}
+                  </button>
+                </div>
+              )}
+              {discountRule && discountResult && !discountResult.eligible && (
+                <p className="text-red-500 text-xs mt-1 font-semibold">{discountResult.reason}</p>
+              )}
+              {discountError && <p className="text-red-500 text-xs mt-1 font-semibold">{discountError}</p>}
             </div>
             
             <div className="flex justify-between items-center border-t border-gray-700 pt-4">

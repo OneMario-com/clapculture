@@ -1,11 +1,14 @@
 import { Hono } from 'hono';
 import { ID } from 'node-appwrite';
 import { getAppwriteClient } from '../lib/appwrite';
-import { getDbId, getEnv } from '../lib/utils';
+import { getDbId, getEnv, pickFields } from '../lib/utils';
 import { adminAuth } from '../middleware/auth';
 import { getAllCategories, invalidateCatalog } from '../lib/catalog';
 
 const categories = new Hono();
+
+// Attributes of the live `categories` collection.
+const CATEGORY_FIELDS = ['name', 'slug', 'description', 'image'] as const;
 
 categories.get('/', async (c) => {
   try {
@@ -20,7 +23,7 @@ categories.get('/', async (c) => {
 
 categories.post('/', adminAuth, async (c) => {
   try {
-    const body = await c.req.json();
+    const body = pickFields(await c.req.json(), CATEGORY_FIELDS);
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 
@@ -42,7 +45,7 @@ categories.post('/', adminAuth, async (c) => {
 categories.put('/:id', adminAuth, async (c) => {
   try {
     const id = c.req.param('id') || '';
-    const body = await c.req.json();
+    const body = pickFields(await c.req.json(), CATEGORY_FIELDS);
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 

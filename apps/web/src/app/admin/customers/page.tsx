@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin-fetch';
 
 interface AdminCustomer {
   id: string;
@@ -21,15 +22,12 @@ export default function CustomersPage() {
     async function loadCustomers() {
       try {
         setLoading(true);
-        const token = localStorage.getItem('adminToken');
-        const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-
         // 1. Fetch direct customers from /api/customers
-        const custRes = await fetch('/api/customers', { headers }).catch(() => null);
+        const custRes = await adminFetch('/api/customers').catch(() => null);
         const custData = custRes && custRes.ok ? await custRes.json() : null;
         
         // 2. Fetch orders from /api/orders
-        const ordersRes = await fetch('/api/orders', { headers }).catch(() => null);
+        const ordersRes = await adminFetch('/api/orders').catch(() => null);
         const ordersData = ordersRes && ordersRes.ok ? await ordersRes.json() : null;
 
         const customerMap = new Map<string, AdminCustomer>();

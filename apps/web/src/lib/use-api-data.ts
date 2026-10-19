@@ -376,3 +376,19 @@ export function getBootstrapHomepage(): Record<string, unknown> | null {
   const cached = getLocalCache();
   return cached?.homepage || null;
 }
+
+/**
+ * After an admin homepage save: put the saved copy into the cached bootstrap (memory and
+ * localStorage) so a later read of the cache can't re-apply the previous homepage.
+ */
+export function setBootstrapHomepage(homepage: Record<string, unknown>): void {
+  if (bootstrapData) bootstrapData = { ...bootstrapData, homepage };
+  const cached = readLocalCacheEntry();
+  if (!cached) return;
+  try {
+    const entry: CachedBootstrap = { ...cached, data: { ...cached.data, homepage } };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(entry));
+  } catch {
+    // Storage unavailable: the in-memory copy is still updated.
+  }
+}

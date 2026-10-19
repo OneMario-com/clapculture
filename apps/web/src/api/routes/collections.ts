@@ -1,11 +1,14 @@
 import { Hono } from 'hono';
 import { ID } from 'node-appwrite';
 import { getAppwriteClient } from '../lib/appwrite';
-import { getDbId, getEnv } from '../lib/utils';
+import { getDbId, getEnv, pickFields } from '../lib/utils';
 import { adminAuth } from '../middleware/auth';
 import { getAllCollections, getAllProducts, isProductVisible, invalidateCatalog } from '../lib/catalog';
 
 const collections = new Hono();
+
+// Attributes of the live `collections` collection.
+const COLLECTION_FIELDS = ['name', 'slug', 'description', 'image', 'productIds'] as const;
 
 const PUBLIC_CACHE_HEADER = 'public, max-age=60, s-maxage=300, stale-while-revalidate=600';
 
@@ -46,7 +49,7 @@ collections.get('/:slug', async (c) => {
 
 collections.post('/', adminAuth, async (c) => {
   try {
-    const body = await c.req.json();
+    const body = pickFields(await c.req.json(), COLLECTION_FIELDS);
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 
@@ -68,7 +71,7 @@ collections.post('/', adminAuth, async (c) => {
 collections.put('/:id', adminAuth, async (c) => {
   try {
     const id = c.req.param('id') || '';
-    const body = await c.req.json();
+    const body = pickFields(await c.req.json(), COLLECTION_FIELDS);
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 

@@ -1,11 +1,14 @@
 import { Hono } from 'hono';
 import { getAppwriteClient } from '../lib/appwrite';
-import { getDbId, getEnv } from '../lib/utils';
+import { getDbId, getEnv, pickFields } from '../lib/utils';
 import { adminAuth } from '../middleware/auth';
 import { cached, invalidate } from '../lib/cache';
 import { Query } from 'node-appwrite';
 
 const settings = new Hono();
+
+// Attributes of the live `settings` collection.
+const SETTINGS_FIELDS = ['storeName', 'currency', 'freeShippingThreshold', 'shippingFee', 'upiId', 'qrCodeUrl'] as const;
 
 const DEFAULT_SETTINGS = {
   storeName: 'CLAPCULTURE',
@@ -35,7 +38,7 @@ settings.get('/', async (c) => {
 
 settings.put('/', adminAuth, async (c) => {
   try {
-    const body = await c.req.json();
+    const body = pickFields(await c.req.json(), SETTINGS_FIELDS);
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 

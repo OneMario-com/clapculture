@@ -18,6 +18,14 @@ import {
   isNotFoundError,
 } from '../lib/orders';
 import { upsertCustomerAndUser } from './customers';
+import { calculateDiscount } from '@clapculture/shared';
+import {
+  normalizeCode,
+  getDiscountByCode,
+  discountUnavailableReason,
+  toDiscountRule,
+  incrementDiscountUsage,
+} from '../lib/discounts';
 import {
   sendOrderConfirmationEmail,
   sendPaymentVerifiedEmail,
@@ -93,12 +101,50 @@ orders.post('/', async (c) => {
     return c.json({ success: false, error: 'Too many items for a single order. Please split it into two orders.' }, 400);
   }
 
+  const priceWarnings: string[] = [];
+  if (priced.unverifiedItems.length > 0) {
+    priceWarnings.push(`Price not verified (product no longer in catalog): ${priced.unverifiedItems.join(', ')}.`);
+  }
+
+  // Discount codes are re-checked here; the checkout page's word for it is not trusted.
+  const requestedCode = normalizeCode(body.discountCode);
+  let discount: { code: string; amount: number; id: string } | null = null;
+  if (requestedCode) {
+    try {
+      const discountDoc = await getDiscountByCode(requestedCode);
+      const unavailable = discountUnavailableReason(discountDoc);
+      const result = discountDoc && !unavailable
+        ? calculateDiscount(toDiscountRule(discountDoc), priced.subtotal, priced.shipping)
+        : null;
+      if (discountDoc && result?.eligible) {
+        discount = { code: requestedCode, amount: result.amount, id: discountDoc.$id };
+      } else {
+        priceWarnings.push(`Discount ${requestedCode} was NOT applied (${unavailable || result?.reason || 'not valid'}).`);
+      }
+    } catch {
+      priceWarnings.push(`Discount ${requestedCode} could not be checked and was NOT applied.`);
+    }
+  }
+  const total = priced.total - (discount?.amount || 0);
+
+  const clientTotal = Number(body.total);
+  if (Number.isFinite(clientTotal) && Math.abs(clientTotal - total) > 0.5) {
+    priceWarnings.push(`Checkout page showed ₹${clientTotal} but the order total is ₹${total} — check the amount actually paid.`);
+  }
+
   const orderData: Record<string, unknown> = {
-    customer: JSON.stringify({ ...customer, screenshotUrl, paymentProof: screenshotUrl }),
+    // `customer` is the order's free-form JSON column, so payment proof and the
+    // applied discount are recorded alongside the customer's details.
+    customer: JSON.stringify({
+      ...customer,
+      screenshotUrl,
+      paymentProof: screenshotUrl,
+      ...(discount ? { discountCode: discount.code, discountAmount: discount.amount } : {}),
+    }),
     items: itemsStr,
     subtotal: priced.subtotal,
     shipping: priced.shipping,
-    total: priced.total,
+    total,
     paymentStatus: 'SUBMITTED',
     orderStatus: 'PLACED',
     transactionId,
@@ -114,13 +160,13 @@ orders.post('/', async (c) => {
     // The customer has already paid: make sure the shop hears about it even if the database is down.
     runInBackground(
       sendAdminAlertEmail(env, {
-        subject: `ACTION NEEDED: order could not be saved (₹${priced.total}, UTR ${transactionId})`,
+        subject: `ACTION NEEDED: order could not be saved (₹${total}, UTR ${transactionId})`,
         title: 'ORDER NOT SAVED',
         message: `A customer submitted payment details but the order could not be saved to the database: ${(error as Error).message}. Contact the customer and record the order manually.`,
         metadata: {
           customer: `${customer.fullName} (${customer.email}, ${customer.phone})`,
           address: `${customer.address}, ${customer.city || ''}, ${customer.state || ''} ${customer.pincode || ''}`,
-          amount: `₹${priced.total}`,
+          amount: `₹${total}${discount ? ` (discount ${discount.code} −₹${discount.amount})` : ''}`,
           utr: transactionId,
           screenshot: screenshotUrl,
           items: priced.items.map((i) => `${i.name} (${i.size}) x${i.quantity}`).join('; '),
@@ -161,7 +207,10 @@ orders.post('/', async (c) => {
         toEmail: customer.email,
         customerName: customer.fullName || 'Valued Rebel',
         orderId,
-        totalAmount: priced.total,
+        totalAmount: total,
+        subtotal: priced.subtotal,
+        shippingFee: priced.shipping,
+        discountAmount: discount?.amount || 0,
         items: priced.items,
         paymentStatus: 'SUBMITTED',
         shippingAddress: `${customer.address || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.pincode || ''}`,
@@ -169,26 +218,21 @@ orders.post('/', async (c) => {
       'Email confirmation'
     );
 
-    const clientTotal = Number(body.total);
-    const priceWarnings: string[] = [];
-    if (Number.isFinite(clientTotal) && Math.abs(clientTotal - priced.total) > 0.5) {
-      priceWarnings.push(`Checkout page showed ₹${clientTotal} but current catalog prices total ₹${priced.total} — check the amount actually paid.`);
-    }
-    if (priced.unverifiedItems.length > 0) {
-      priceWarnings.push(`Price not verified (product no longer in catalog): ${priced.unverifiedItems.join(', ')}.`);
+    if (discount) {
+      runInBackground(incrementDiscountUsage(discount.id), 'Discount usage count');
     }
 
     runInBackground(
       sendAdminAlertEmail(env, {
-        subject: `New Order Placed #${orderId} (₹${priced.total})`,
+        subject: `New Order Placed #${orderId} (₹${total})`,
         title: `NEW ORDER #${orderId}`,
-        message: `A new order has been placed by ${customer.fullName || 'Customer'} for ₹${priced.total}.${priceWarnings.length ? ` ⚠️ ${priceWarnings.join(' ')}` : ''}`,
+        message: `A new order has been placed by ${customer.fullName || 'Customer'} for ₹${total}.${priceWarnings.length ? ` ⚠️ ${priceWarnings.join(' ')}` : ''}`,
         actionUrl: `/admin/orders/${doc.$id}`,
         actionText: 'VIEW ORDER IN ADMIN',
         metadata: {
           orderId,
           customer: `${customer.fullName} (${customer.email}, ${customer.phone})`,
-          amount: `₹${priced.total}`,
+          amount: `₹${total}${discount ? ` (discount ${discount.code} −₹${discount.amount})` : ''}`,
           utr: transactionId,
           itemsCount: priced.items.length,
         },

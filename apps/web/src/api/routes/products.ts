@@ -1,7 +1,7 @@
 import { Hono, Context } from 'hono';
 import { ID } from 'node-appwrite';
 import { getAppwriteClient } from '../lib/appwrite';
-import { getDbId, getEnv } from '../lib/utils';
+import { getDbId, getEnv, withoutSystemFields } from '../lib/utils';
 import { adminAuth, getAdminFromRequest } from '../middleware/auth';
 import { getAllProducts, findProduct, isProductVisible, invalidateCatalog } from '../lib/catalog';
 
@@ -81,7 +81,7 @@ products.get('/:slug', async (c) => {
 
 products.post('/', adminAuth, async (c) => {
   try {
-    const body = await c.req.json();
+    const body = withoutSystemFields(await c.req.json());
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 
@@ -108,7 +108,7 @@ products.post('/', adminAuth, async (c) => {
 products.put('/:id', adminAuth, async (c) => {
   try {
     const id = c.req.param('id') || '';
-    const body = await c.req.json();
+    const body = withoutSystemFields(await c.req.json());
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 
