@@ -6,5 +6,5 @@ export const dynamic = 'force-dynamic';
 
 export default async function OrderDetailPage({ params }: { params: Promise<{ orderId: string }> }) {
   const { orderId } = await params;
-  return <AdminOrderClient orderId={orderId} />;
+  return <AdminOrderClient key={orderId} orderId={orderId} />;
 }

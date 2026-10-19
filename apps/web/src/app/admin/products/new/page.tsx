@@ -77,7 +77,10 @@ export default function AddProductPage() {
 
     checkTimeoutRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/products/check/slug?slug=${encodeURIComponent(slug)}`);
+        const token = localStorage.getItem('adminToken');
+        const res = await fetch(`/api/products/check/slug?slug=${encodeURIComponent(slug)}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
         const json = await res.json();
         if (json.success) {
           if (json.available) {

@@ -1,33 +1,19 @@
 import { Hono } from 'hono';
-import { ID, Query } from 'node-appwrite';
+import { ID } from 'node-appwrite';
 import { getAppwriteClient } from '../lib/appwrite';
 import { getDbId, getEnv } from '../lib/utils';
 import { adminAuth } from '../middleware/auth';
-import { getCached, setCached, clearCache } from '../lib/cache';
+import { getAllCollections, getAllProducts, isProductVisible, invalidateCatalog } from '../lib/catalog';
 
 const collections = new Hono();
 
+const PUBLIC_CACHE_HEADER = 'public, max-age=60, s-maxage=300, stale-while-revalidate=600';
+
 collections.get('/', async (c) => {
   try {
-    const cached = getCached('collections_all');
-    if (cached) {
-      c.header('X-Cache', 'HIT');
-      c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
-      return c.json({ success: true, data: cached });
-    }
-
-    const { databases } = getAppwriteClient(getEnv(c));
-    const dbId = getDbId(c);
-    
-    const response = await databases.listDocuments(
-      dbId,
-      'collections'
-    );
-    
-    setCached('collections_all', response.documents, 300);
-    c.header('X-Cache', 'MISS');
-    c.header('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600');
-    return c.json({ success: true, data: response.documents });
+    const documents = await getAllCollections();
+    c.header('Cache-Control', PUBLIC_CACHE_HEADER);
+    return c.json({ success: true, data: documents });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Internal server error';
     return c.json({ success: false, error: msg }, 500);
@@ -36,34 +22,21 @@ collections.get('/', async (c) => {
 
 collections.get('/:slug', async (c) => {
   try {
-    const { databases } = getAppwriteClient(getEnv(c));
-    const dbId = getDbId(c);
     const slug = c.req.param('slug') || '';
-    
-    const response = await databases.listDocuments(
-      dbId,
-      'collections',
-      [Query.equal('slug', slug), Query.limit(1)]
-    );
-    
-    if (response.documents.length === 0) {
+    const [allCollections, allProducts] = await Promise.all([getAllCollections(), getAllProducts()]);
+
+    const collection = allCollections.find((col) => col.slug === slug);
+    if (!collection) {
       return c.json({ success: false, error: 'Collection not found' }, 404);
     }
-    
-    const collectionData = response.documents[0] as Record<string, unknown>;
-    
-    const pIds = Array.isArray(collectionData.productIds) ? collectionData.productIds : [];
-    if (pIds.length > 0) {
-      const productsRes = await databases.listDocuments(
-        dbId,
-        'products',
-        [Query.equal('$id', pIds)]
-      );
-      collectionData.products = productsRes.documents;
-    } else {
-      collectionData.products = [];
-    }
-    
+
+    const pIds = Array.isArray(collection.productIds) ? (collection.productIds as string[]) : [];
+    const collectionData: Record<string, unknown> = {
+      ...collection,
+      products: allProducts.filter((p) => pIds.includes(p.$id) && isProductVisible(p)),
+    };
+
+    c.header('Cache-Control', PUBLIC_CACHE_HEADER);
     return c.json({ success: true, data: collectionData });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Internal server error';
@@ -76,15 +49,15 @@ collections.post('/', adminAuth, async (c) => {
     const body = await c.req.json();
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
-    
+
     const response = await databases.createDocument(
       dbId,
       'collections',
       ID.unique(),
       body
     );
-    
-    clearCache('collections');
+
+    await invalidateCatalog();
     return c.json({ success: true, data: response }, 201);
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Internal server error';
@@ -98,15 +71,15 @@ collections.put('/:id', adminAuth, async (c) => {
     const body = await c.req.json();
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
-    
+
     const response = await databases.updateDocument(
       dbId,
       'collections',
       id,
       body
     );
-    
-    clearCache('collections');
+
+    await invalidateCatalog();
     return c.json({ success: true, data: response });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Internal server error';
@@ -119,14 +92,14 @@ collections.delete('/:id', adminAuth, async (c) => {
     const id = c.req.param('id') || '';
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
-    
+
     await databases.deleteDocument(
       dbId,
       'collections',
       id
     );
-    
-    clearCache('collections');
+
+    await invalidateCatalog();
     return c.json({ success: true, data: { deleted: true } });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Internal server error';

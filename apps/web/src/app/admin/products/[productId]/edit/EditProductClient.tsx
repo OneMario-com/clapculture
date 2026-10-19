@@ -66,7 +66,10 @@ export default function EditProductClient({ productId }: { productId: string }) 
   const loadProduct = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/products/${productId}?includeHidden=true`);
+      const token = localStorage.getItem('adminToken');
+      const res = await fetch(`/api/products/${productId}?includeHidden=true`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (!res.ok) {
         showNotification('Failed to fetch product details from database', true);
         return;
@@ -177,8 +180,10 @@ export default function EditProductClient({ productId }: { productId: string }) 
 
     checkTimeoutRef.current = setTimeout(async () => {
       try {
+        const token = localStorage.getItem('adminToken');
         const res = await fetch(
-          `/api/products/check/slug?slug=${encodeURIComponent(formData.slug)}&excludeId=${encodeURIComponent(productId)}`
+          `/api/products/check/slug?slug=${encodeURIComponent(formData.slug)}&excludeId=${encodeURIComponent(productId)}`,
+          { headers: token ? { Authorization: `Bearer ${token}` } : {} }
         );
         const json = await res.json();
         if (json.success) {

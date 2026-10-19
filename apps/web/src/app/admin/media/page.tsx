@@ -41,10 +41,15 @@ export default function MediaLibrary() {
     let cancelled = false;
     const load = async () => {
       try {
-        const res = await fetch('/api/media');
-        const json = await res.json();
-        if (json.success && json.data && !cancelled) {
+        const token = localStorage.getItem('adminToken');
+        const res = await fetch('/api/media', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        const json = await res.json().catch(() => null);
+        if (json?.success && json.data && !cancelled) {
           setMedia(json.data);
+        } else if (!cancelled) {
+          showToast(json?.error || 'Failed to load media');
         }
       } catch (err) {
         console.error('Failed to fetch media', err);
@@ -71,14 +76,18 @@ export default function MediaLibrary() {
     
     try {
       showToast('Deleting...');
-      const res = await fetch(`/api/media/${id}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (json.success) {
+      const token = localStorage.getItem('adminToken');
+      const res = await fetch(`/api/media/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const json = await res.json().catch(() => null);
+      if (json?.success) {
         setMedia(media.filter(m => m.id !== id));
         showToast('File deleted successfully');
         if (previewItem?.id === id) setPreviewItem(null);
       } else {
-        showToast(json.error || 'Failed to delete file');
+        showToast(json?.error || 'Failed to delete file');
       }
     } catch (err) {
       console.error(err);

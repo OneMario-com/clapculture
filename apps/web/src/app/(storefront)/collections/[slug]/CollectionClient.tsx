@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import Link from 'next/link';
 import { Product, Collection } from '@clapculture/shared';
 import { useProducts, useCategories } from '@/lib/use-api-data';
@@ -17,25 +17,16 @@ export default function CollectionClient({ collection }: { collection: Collectio
   const { data: categories } = useCategories();
   
   // Use products from the collection API response if available, otherwise match from all products
-  const [productsList, setProductsList] = useState<Product[]>(collection.products || []);
+  const productsList = useMemo<Product[]>(
+    () => (collection.products && collection.products.length > 0 ? collection.products : allProducts),
+    [allProducts, collection.products]
+  );
   
   const [filters, setFilters] = useState<FilterState>({
     selectedCategories: [],
     selectedSizes: [],
     sortBy: 'NEWEST',
   });
-
-  // If collection came with products from the API, use those; otherwise match from allProducts
-  useEffect(() => {
-    if (collection.products && collection.products.length > 0) {
-      setProductsList(collection.products);
-      return;
-    }
-    // Fallback: match products by productIds or keyword matching
-    if (allProducts.length > 0) {
-      setProductsList(allProducts);
-    }
-  }, [allProducts, collection.products]);
 
   const baseProducts = useMemo(() => {
     const slug = (collection.slug || '').toLowerCase();

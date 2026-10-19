@@ -91,9 +91,8 @@ async function seedAdmin() {
     }
 
     console.log('--------------------------------------------------');
-    console.log('✨ Admin credentials successfully seeded in Appwrite!');
-    console.log(`🔑 Login Email: ${ADMIN_EMAIL}`);
-    console.log(`🔑 Login Password: ${ADMIN_PASSWORD}`);
+    console.log('✨ Admin profile seeded in Appwrite.');
+    console.log('🔑 Admin login uses the ADMIN_EMAIL and ADMIN_PASSWORD environment variables of the deployed site.');
     console.log('--------------------------------------------------');
   } catch (error) {
     console.error('❌ Admin seeder encountered an error:', error.message || error);

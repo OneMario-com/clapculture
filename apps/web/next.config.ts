@@ -18,6 +18,10 @@ const nextConfig: NextConfig = {
     SMTP_FROM_NAME: process.env.SMTP_FROM_NAME,
     SMTP_FROM_EMAIL: process.env.SMTP_FROM_EMAIL,
     ADMIN_NOTIFICATION_EMAIL: process.env.ADMIN_NOTIFICATION_EMAIL,
+    ADMIN_EMAIL: process.env.ADMIN_EMAIL,
+    ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
+    UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
+    UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
   },
   images: {
     remotePatterns: [

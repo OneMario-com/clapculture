@@ -36,7 +36,10 @@ export default function ProductsPage() {
     const load = async () => {
       try {
         setLoading(true);
-        const res = await fetch('/api/products?limit=100&includeHidden=true');
+        const token = localStorage.getItem('adminToken');
+        const res = await fetch('/api/products?limit=100&includeHidden=true', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
         if (res.ok && !cancelled) {
           const data = await res.json();
           if (data.success && Array.isArray(data.data)) {

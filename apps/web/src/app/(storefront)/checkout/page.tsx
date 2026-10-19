@@ -5,7 +5,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useCart } from '@/components/cart/CartProvider';
 import { useOrderStore, CheckoutInfo } from '@/lib/store';
-import { formatCurrency, generateOrderId, resolveImageUrl } from '@/lib/utils';
+import { formatCurrency, resolveImageUrl } from '@/lib/utils';
 import Link from 'next/link';
 
 interface CountryCode {
@@ -181,15 +181,23 @@ export default function CheckoutPage() {
 
     setCheckoutInfo(updatedForm);
 
-    let nextOrderId = 'CLAP01001';
+    // Reserve a unique order number. There is deliberately no client-side fallback:
+    // a made-up number is shared by every shopper it is given to.
+    let nextOrderId = '';
     try {
-      const res = await fetch('/api/orders/next-id');
+      const res = await fetch('/api/orders/next-id', { cache: 'no-store' });
       const json = await res.json();
-      if (json.success && json.data?.orderId) {
-        nextOrderId = json.data.orderId.replace('#', '');
+      if (res.ok && json.success && json.data?.orderId) {
+        nextOrderId = String(json.data.orderId).replace('#', '');
+      } else {
+        setErrors({ form: json.error || 'We could not start your checkout. Please try again in a minute.' });
       }
     } catch {
-      nextOrderId = generateOrderId().replace('#', '');
+      setErrors({ form: 'Network error. Please check your connection and try again.' });
+    }
+    if (!nextOrderId) {
+      setLoading(false);
+      return;
     }
 
     // Save order data in client store & local storage for payment completion
@@ -431,8 +439,12 @@ export default function CheckoutPage() {
               </div>
             </div>
 
-            <button 
-              type="submit" 
+            {errors.form && (
+              <p className="text-red-500 text-sm font-semibold border border-red-500/40 bg-red-500/10 p-3">{errors.form}</p>
+            )}
+
+            <button
+              type="submit"
               disabled={loading}
               className={`w-full bg-electric-lime text-black font-headline-md text-xl py-5 uppercase transition-colors ${loading ? 'opacity-70 cursor-not-allowed' : 'hover:bg-white'}`}
             >

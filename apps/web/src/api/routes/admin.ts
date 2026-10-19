@@ -1,54 +1,63 @@
 import { Hono } from 'hono';
 import { adminAuth } from '../middleware/auth';
-import { getAppwriteClient } from '../lib/appwrite';
-import { getDbId, getEnv } from '../lib/utils';
-import { signAdminToken } from '../lib/jwt';
-import { Query, Models } from 'node-appwrite';
+import { getEnv, getClientIp } from '../lib/utils';
+import { isJwtConfigured, signAdminToken, timingSafeEqual } from '../lib/jwt';
+import { isRateLimited, clearRateLimit } from '../lib/redis';
+import { listOrdersCached } from '../lib/orders';
 
 const admin = new Hono();
 
+const LOGIN_ATTEMPTS_PER_WINDOW = 10;
+const LOGIN_WINDOW_SECONDS = 15 * 60;
+
+// Admin credentials come from server environment variables, not the database:
+// login keeps working while Appwrite is paused, costs zero database reads, and
+// a customer record can never be mistaken for an admin account.
 admin.post('/login', async (c) => {
   try {
-    const { username, password } = await c.req.json();
-    
+    const body = await c.req.json().catch(() => ({}));
+    const username = String(body.username || '').trim().toLowerCase();
+    const password = String(body.password || '');
+
     if (!username || !password) {
       return c.json({ success: false, error: 'Username and password required' }, 400);
     }
 
-    const { databases } = getAppwriteClient(getEnv(c));
-    const dbId = getDbId(c);
-    
-    let adminRecord: Models.Document | null = null;
+    const env = getEnv(c);
+    const adminEmail = (env.ADMIN_EMAIL || process.env.ADMIN_EMAIL || 'admin@clapculture.com').trim().toLowerCase();
+    const adminPassword = env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || '';
 
-    // Check Appwrite database for seeded admin credentials
-    try {
-      const dbAdmins = await databases.listDocuments(
-        dbId,
-        'customers',
-        [Query.equal('email', username.toLowerCase()), Query.limit(1)]
-      );
-      if (dbAdmins.documents.length > 0) {
-        adminRecord = dbAdmins.documents[0];
-      }
-    } catch {
-      // Fallback
+    if (!adminPassword || !isJwtConfigured()) {
+      console.error('Admin login is not configured: set ADMIN_PASSWORD and a new random JWT_SECRET (32+ chars).');
+      return c.json({
+        success: false,
+        error: 'Admin login is not configured on the server. Set ADMIN_PASSWORD and a new JWT_SECRET in the environment.',
+      }, 503);
     }
 
-    // Default seeded admin credentials check
-    const isValidDefaultAdmin = (username === 'admin@clapculture.com' || username === 'admin') && (password === 'clapculture123' || password === 'admin123');
-
-    if (!isValidDefaultAdmin && !adminRecord) {
-      return c.json({ success: false, error: 'Invalid admin credentials' }, 401);
+    const limiterKey = `admin-login:${getClientIp(c)}`;
+    if (await isRateLimited(limiterKey, LOGIN_ATTEMPTS_PER_WINDOW, LOGIN_WINDOW_SECONDS)) {
+      return c.json({ success: false, error: 'Too many login attempts. Please wait 15 minutes and try again.' }, 429);
     }
+
+    const [emailMatches, passwordMatches] = await Promise.all([
+      timingSafeEqual(username, adminEmail),
+      timingSafeEqual(password, adminPassword),
+    ]);
+    if (!emailMatches || !passwordMatches) {
+      return c.json({ success: false, error: 'Invalid email or password' }, 401);
+    }
+
+    await clearRateLimit(limiterKey);
 
     const adminUser = {
-      id: adminRecord?.$id || 'admin-1',
-      username: username,
+      id: 'admin',
+      username: adminEmail,
       role: 'admin',
     };
 
     // Sign JWT session token
-    const token = signAdminToken(adminUser);
+    const token = await signAdminToken(adminUser);
     
     return c.json({
       success: true,
@@ -66,18 +75,11 @@ admin.post('/login', async (c) => {
 
 admin.get('/dashboard', adminAuth, async (c) => {
   try {
-    const { databases } = getAppwriteClient(getEnv(c));
-    const dbId = getDbId(c);
-    
-    const ordersRes = await databases.listDocuments(
-      dbId,
-      'orders',
-      [Query.limit(100)]
-    );
-    
-    const totalOrders = ordersRes.total;
-    const totalSales = ordersRes.documents.reduce((acc, o) => acc + (Number((o as Record<string, unknown>).total) || 0), 0);
-    const pendingPayments = ordersRes.documents.filter((o) => (o as Record<string, unknown>).paymentStatus === 'SUBMITTED').length;
+    const allOrders = await listOrdersCached(c);
+
+    const totalOrders = allOrders.length;
+    const totalSales = allOrders.reduce((acc, o) => acc + (Number(o.total) || 0), 0);
+    const pendingPayments = allOrders.filter((o) => o.paymentStatus === 'SUBMITTED').length;
     
     return c.json({ 
       success: true, 
@@ -99,7 +101,7 @@ admin.get('/me', adminAuth, async (c) => {
 });
 
 // Verify Gmail SMTP Connectivity
-admin.get('/email/verify', async (c) => {
+admin.get('/email/verify', adminAuth, async (c) => {
   const { verifySmtpConnection } = await import('../lib/mailer');
   const env = getEnv(c);
   const result = await verifySmtpConnection(env);
@@ -107,7 +109,8 @@ admin.get('/email/verify', async (c) => {
 });
 
 // Send Test Email via Gmail SMTP / Appwrite Messaging
-admin.post('/email/test', async (c) => {
+// Admin-only: otherwise anyone could use the store's Gmail account to email arbitrary addresses.
+admin.post('/email/test', adminAuth, async (c) => {
   try {
     const {
       sendTestEmail,

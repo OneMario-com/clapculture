@@ -21,15 +21,32 @@ let lastConfigKey = '';
 
 export type MailerEnv = Record<string, string | undefined>;
 
+const SMTP_NOT_CONFIGURED = 'SMTP not configured: set SMTP_USER and SMTP_PASS.';
+
 /**
- * Get or initialize the Nodemailer transporter for Gmail SMTP
+ * SMTP credentials come only from the environment. There is deliberately no
+ * built-in fallback account: a missing secret must fail loudly, not silently
+ * send through a hard-coded mailbox.
+ */
+function getSmtpCredentials(env?: MailerEnv): { user: string; pass: string } | null {
+  const user = (env?.SMTP_USER || process.env.SMTP_USER || '').trim();
+  const pass = (env?.SMTP_PASS || process.env.SMTP_PASS || '').replace(/\s+/g, '');
+  if (!user || !pass) return null;
+  return { user, pass };
+}
+
+/**
+ * Get or initialize the Nodemailer transporter for Gmail SMTP.
+ * Returns null when SMTP is not configured or Nodemailer is unavailable.
  */
 export function getMailTransporter(env?: MailerEnv): Transporter | null {
+  const credentials = getSmtpCredentials(env);
+  if (!credentials) return null;
+
   const host = env?.SMTP_HOST || process.env.SMTP_HOST || 'smtp.gmail.com';
   const port = Number(env?.SMTP_PORT || process.env.SMTP_PORT || 465);
   const secure = port === 465 || env?.SMTP_SECURE === 'true' || process.env.SMTP_SECURE === 'true';
-  const user = env?.SMTP_USER || process.env.SMTP_USER || 'clapcultureofficial@gmail.com';
-  const pass = (env?.SMTP_PASS || process.env.SMTP_PASS || 'bjrlqlfpyazdnjjg').replace(/\s+/g, '');
+  const { user, pass } = credentials;
 
   const configKey = `${host}:${port}:${user}:${pass}`;
 
@@ -48,9 +65,6 @@ export function getMailTransporter(env?: MailerEnv): Transporter | null {
       auth: {
         user,
         pass,
-      },
-      tls: {
-        rejectUnauthorized: false,
       },
       pool: true,
       maxConnections: 5,
@@ -77,6 +91,14 @@ export async function sendMail(
   const fromAddress = `"${fromName}" <${fromEmail}>`;
 
   const recipients = Array.isArray(options.to) ? options.to.join(', ') : options.to;
+
+  if (!getSmtpCredentials(env)) {
+    console.error(`❌ [Gmail SMTP Error] Cannot send email to [${recipients}]: ${SMTP_NOT_CONFIGURED}`);
+    return {
+      success: false,
+      error: SMTP_NOT_CONFIGURED,
+    };
+  }
 
   try {
     const transporter = getMailTransporter(env);
@@ -119,6 +141,13 @@ export async function sendMail(
  * Verify SMTP connection and credentials
  */
 export async function verifySmtpConnection(env?: MailerEnv): Promise<{ success: boolean; message: string }> {
+  if (!getSmtpCredentials(env)) {
+    return {
+      success: false,
+      message: SMTP_NOT_CONFIGURED,
+    };
+  }
+
   try {
     const transporter = getMailTransporter(env);
     if (!transporter) {

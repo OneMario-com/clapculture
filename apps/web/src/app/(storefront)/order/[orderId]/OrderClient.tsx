@@ -3,64 +3,123 @@
 import React from 'react';
 import Link from 'next/link';
 import { formatCurrency } from '@/lib/utils';
-import { useOrderStore, OrderData, CheckoutInfo } from '@/lib/store';
+import { useOrderStore, OrderData, CheckoutInfo, useIsClient } from '@/lib/store';
+
+type LoadState = 'idle' | 'loading' | 'loaded' | 'denied' | 'not-found' | 'error';
+
+function parseOrderDoc(doc: Record<string, unknown>): OrderData {
+  const parse = (value: unknown) => {
+    if (typeof value !== 'string') return value;
+    try { return JSON.parse(value); } catch { return value; }
+  };
+  return {
+    ...(doc as unknown as OrderData),
+    customer: parse(doc.customer) as CheckoutInfo,
+    items: (parse(doc.items) || []) as OrderData['items'],
+    createdAt: String(doc.$createdAt || doc.createdAt || ''),
+  };
+}
 
 export default function OrderClient({ orderId }: { orderId: string }) {
-  const { getOrder, currentOrder, checkoutInfo } = useOrderStore();
+  const { getOrder } = useOrderStore();
+  const isClient = useIsClient();
   const cleanId = orderId.replace('#', '');
-  const localOrder = getOrder(cleanId) || (currentOrder?.orderId === cleanId ? currentOrder : null);
+  // Only this exact order from this device's own history — never "the current order".
+  const localOrder = isClient ? getOrder(cleanId) : null;
+  const knownContact = localOrder?.customer?.email || '';
+
+  const [contactInput, setContactInput] = React.useState('');
+  const [submittedContact, setSubmittedContact] = React.useState('');
+  const contact = submittedContact || knownContact;
 
   const [dbOrder, setDbOrder] = React.useState<OrderData | null>(null);
-  const [accessDenied, setAccessDenied] = React.useState(false);
+  const [loadState, setLoadState] = React.useState<LoadState>('idle');
+  const [errorMessage, setErrorMessage] = React.useState('');
 
   React.useEffect(() => {
+    if (!contact) return;
+    let cancelled = false;
     async function loadDbOrder() {
+      setLoadState('loading');
       try {
-        // Pass contact info for user-scoped access verification
-        const contact = localOrder?.customer?.email || checkoutInfo?.email || '';
-        const url = contact
-          ? `/api/orders/${cleanId}?contact=${encodeURIComponent(contact)}`
-          : `/api/orders/${cleanId}`;
-        const res = await fetch(url);
-        if (res.status === 403) {
-          setAccessDenied(true);
-          return;
+        const res = await fetch(`/api/orders/${encodeURIComponent(cleanId)}?contact=${encodeURIComponent(contact)}`, { cache: 'no-store' });
+        const json = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (res.ok && json.success && json.data) {
+          setDbOrder(parseOrderDoc(json.data));
+          setLoadState('loaded');
+        } else if (res.status === 403) {
+          setLoadState('denied');
+        } else if (res.status === 404) {
+          setLoadState('not-found');
+        } else {
+          setErrorMessage(json.error || 'Unable to load this order right now.');
+          setLoadState('error');
         }
-        if (res.ok) {
-          const json = await res.json();
-          if (json.success && json.data) {
-            const doc = json.data;
-            let parsedCustomer = doc.customer;
-            if (typeof doc.customer === 'string') {
-              try { parsedCustomer = JSON.parse(doc.customer); } catch {}
-            }
-            let parsedItems = doc.items;
-            if (typeof doc.items === 'string') {
-              try { parsedItems = JSON.parse(doc.items); } catch {}
-            }
-
-            setDbOrder({
-              ...doc,
-              customer: parsedCustomer,
-              items: parsedItems,
-            });
-          }
+      } catch {
+        if (!cancelled) {
+          setErrorMessage('Unable to connect. Please check your connection and try again.');
+          setLoadState('error');
         }
-      } catch (e) {
-        console.error('Failed to fetch DB order:', e);
       }
     }
     loadDbOrder();
-  }, [cleanId, localOrder?.customer?.email, checkoutInfo?.email]);
+    return () => { cancelled = true; };
+  }, [cleanId, contact]);
 
-  const activeOrder = dbOrder || localOrder;
+  // The server's copy is authoritative. This device's own copy is only shown
+  // while the order service is unreachable.
+  const activeOrder = dbOrder || (loadState === 'error' ? localOrder : null);
   const items = activeOrder?.items || [];
   const customer: Partial<CheckoutInfo> = activeOrder?.customer || {};
 
-  const total = activeOrder?.total || 1099;
+  const total = Number(activeOrder?.total) || 0;
   const paymentStatus = activeOrder?.paymentStatus || 'SUBMITTED';
+  const orderDate = activeOrder?.createdAt ? new Date(activeOrder.createdAt) : null;
 
-  if (accessDenied) {
+  if (!isClient || (contact && (loadState === 'idle' || loadState === 'loading'))) {
+    return (
+      <div className="bg-[#0a0a0a] min-h-screen flex items-center justify-center pt-24">
+        <div className="w-8 h-8 border-2 border-electric-lime border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!activeOrder && loadState !== 'denied') {
+    return (
+      <div className="bg-[#0a0a0a] min-h-screen text-white pt-24 pb-16 px-4 md:px-8 flex flex-col items-center justify-center">
+        <span className="material-symbols-outlined text-6xl text-electric-lime mb-4">receipt_long</span>
+        <h1 className="text-2xl font-headline-md mb-2">VIEW ORDER #{cleanId}</h1>
+        <p className="text-gray-400 text-sm text-center max-w-md mb-6">
+          {loadState === 'not-found'
+            ? 'We could not find this order. Please check the order number.'
+            : loadState === 'error'
+              ? errorMessage
+              : 'Enter the email address or mobile number used for this order to view the receipt.'}
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (contactInput.trim()) setSubmittedContact(contactInput.trim());
+          }}
+          className="w-full max-w-md flex flex-col gap-3"
+        >
+          <input
+            type="text"
+            value={contactInput}
+            onChange={(e) => setContactInput(e.target.value)}
+            placeholder="Email or mobile number"
+            className="w-full bg-black border border-gray-700 p-4 text-white focus:outline-none focus:border-electric-lime rounded"
+          />
+          <button type="submit" className="bg-electric-lime text-black px-6 py-3 font-bold font-label-caps rounded-lg hover:bg-white transition-colors">
+            VIEW RECEIPT
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  if (loadState === 'denied') {
     return (
       <div className="bg-[#0a0a0a] min-h-screen text-white pt-24 pb-16 px-4 md:px-8 flex flex-col items-center justify-center">
         <span className="material-symbols-outlined text-6xl text-red-500 mb-4">lock</span>
@@ -134,7 +193,7 @@ export default function OrderClient({ orderId }: { orderId: string }) {
             <div className="text-right text-xs font-mono text-[#a3a3a3]">
               <p className="text-white font-bold print-black-text">CLAPCULTURE INC.</p>
               <p>TAX INVOICE / ORDER RECEIPT</p>
-              <p>Date: {new Date().toLocaleDateString()}</p>
+              <p>Date: {orderDate && !Number.isNaN(orderDate.getTime()) ? orderDate.toLocaleDateString() : '—'}</p>
             </div>
           </div>
 

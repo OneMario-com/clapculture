@@ -445,50 +445,51 @@ export function getHomepageCMS(): HomepageCMSData {
   }
 }
 
-export function saveHomepageCMS(data: HomepageCMSData): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const payload = {
-      ...data,
-      lastUpdated: new Date().toISOString()
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    window.dispatchEvent(new Event('homepage-cms-updated'));
+export type HomepageCMSSaveResult =
+  | { ok: true; data: HomepageCMSData }
+  | { ok: false; error: string };
 
-    // Persist to Appwrite Database via API
+// PUT the homepage config to the API; the local copy is only updated once the server accepted it.
+async function persistHomepageCMS(payload: HomepageCMSData): Promise<HomepageCMSSaveResult> {
+  if (typeof window === 'undefined') return { ok: false, error: 'Not available on the server' };
+  try {
     const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-    fetch('/api/homepage', {
+    const res = await fetch('/api/homepage', {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify(payload),
-    }).catch((err) => console.log('Database homepage save notice:', err));
-  } catch (e) {
-    console.error('Failed to save Homepage CMS to localStorage', e);
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.success) {
+      return { ok: false, error: json?.error || `Save failed (HTTP ${res.status})` };
+    }
+  } catch (err) {
+    console.error('Database homepage save failed:', err);
+    return { ok: false, error: 'Network error while saving homepage' };
   }
+
+  currentCMSData = payload;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.error('Failed to cache Homepage CMS in localStorage', e);
+  }
+  window.dispatchEvent(new Event('homepage-cms-updated'));
+  return { ok: true, data: payload };
 }
 
-export function resetHomepageCMS(): HomepageCMSData {
-  if (typeof window === 'undefined') return DEFAULT_HOMEPAGE_CMS;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_HOMEPAGE_CMS));
-    window.dispatchEvent(new Event('homepage-cms-updated'));
+export function saveHomepageCMS(data: HomepageCMSData): Promise<HomepageCMSSaveResult> {
+  return persistHomepageCMS({
+    ...data,
+    lastUpdated: new Date().toISOString()
+  });
+}
 
-    const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-    fetch('/api/homepage', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(DEFAULT_HOMEPAGE_CMS),
-    }).catch(() => {});
-  } catch (e) {
-    console.error('Failed to reset Homepage CMS', e);
-  }
-  return DEFAULT_HOMEPAGE_CMS;
+export function resetHomepageCMS(): Promise<HomepageCMSSaveResult> {
+  return persistHomepageCMS(DEFAULT_HOMEPAGE_CMS);
 }
 
 let currentCMSData: HomepageCMSData = DEFAULT_HOMEPAGE_CMS;
@@ -544,13 +545,8 @@ export function useHomepageCMS() {
   return {
     data,
     isLoaded,
-    updateData: (newData: HomepageCMSData) => {
-      currentCMSData = newData;
-      saveHomepageCMS(newData);
-    },
-    resetData: () => {
-      const reset = resetHomepageCMS();
-      currentCMSData = reset;
-    }
+    // Resolve with the server result so callers only report success when the save really persisted
+    updateData: (newData: HomepageCMSData) => saveHomepageCMS(newData),
+    resetData: () => resetHomepageCMS(),
   };
 }

@@ -54,7 +54,7 @@ const config = {
   port: parseInt(process.env.SMTP_PORT || '465', 10),
   secure: process.env.SMTP_SECURE === 'true' || parseInt(process.env.SMTP_PORT || '465', 10) === 465,
   user: process.env.SMTP_USER || 'clapculture.co@gmail.com',
-  pass: (process.env.SMTP_PASS || 'bjrlqlfpyazdnjjg').replace(/\s+/g, ''),
+  pass: (process.env.SMTP_PASS || '').replace(/\s+/g, ''),
   fromName: process.env.SMTP_FROM_NAME || 'CLAPCULTURE',
   fromEmail: process.env.SMTP_FROM_EMAIL || 'clapculture.co@gmail.com',
 };

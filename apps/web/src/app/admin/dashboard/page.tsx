@@ -77,6 +77,7 @@ export default function DashboardPage() {
 
     return {
       id: String(doc.orderId || doc.$id).replace('#', ''),
+      docId: doc.$id,
       customer: customerName,
       status: doc.orderStatus || 'PLACED',
       payment: doc.paymentStatus || 'SUBMITTED',
@@ -176,7 +177,7 @@ export default function DashboardPage() {
                 >
                   <div>
                     <Link
-                      href={`/admin/orders/${order.id}`}
+                      href={`/admin/orders/${encodeURIComponent(order.docId || order.id)}`}
                       className="text-white font-bold font-mono text-sm hover:text-electric-lime block"
                     >
                       #{order.id}

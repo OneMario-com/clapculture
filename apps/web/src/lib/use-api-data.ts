@@ -12,13 +12,15 @@
  */
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Product, Collection, Category } from '@clapculture/shared';
 
 // ─── Build-version cache busting ─────────────────────────────────────
 const BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID || 'dev';
 const STORAGE_KEY = `cc_bootstrap_v4`;
+const RETRY_AT_KEY = `${STORAGE_KEY}_retry_at`;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes client-side
+const FAILURE_BACKOFF = 60 * 1000; // after a failed refresh, don't retry for 1 minute
 
 interface BootstrapData {
   products: Product[];
@@ -40,6 +42,12 @@ interface CachedBootstrap {
 let bootstrapPromise: Promise<BootstrapData | null> | null = null;
 let bootstrapData: BootstrapData | null = null;
 let bootstrapListeners: Array<() => void> = [];
+// When the in-memory data was fetched, for staleness checks without re-reading localStorage.
+let bootstrapStoredAt = 0;
+// At most one background revalidation per page load.
+let backgroundRevalidateStarted = false;
+// Last failed fetch in this page load; stops remounts re-hitting the API when there is no data at all.
+let lastFailureAt = 0;
 
 function notifyListeners() {
   bootstrapListeners.forEach(fn => fn());
@@ -52,28 +60,24 @@ export function subscribeToBootstrap(listener: () => void) {
   };
 }
 
-function getLocalCache(): BootstrapData | null {
+/** Read the localStorage entry for the current build. Side-effect free. */
+function readLocalCacheEntry(): CachedBootstrap | null {
   if (typeof window === 'undefined') return null;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const cached: CachedBootstrap = JSON.parse(raw);
-    
-    // Build mismatch → stale from a previous deploy
-    if (cached.buildId !== BUILD_ID) {
-      localStorage.removeItem(STORAGE_KEY);
-      return null;
-    }
-    
-    // If cache is expired, trigger background update without blocking UI
-    if (Date.now() - cached.storedAt > CACHE_TTL) {
-      setTimeout(() => triggerBackgroundRevalidate(), 100);
-    }
-    
-    return cached.data;
+    // Build mismatch → stale from a previous deploy (overwritten on the next successful fetch).
+    // Entries saved during an outage by older builds are ignored too.
+    if (cached.buildId !== BUILD_ID || looksLikeFailure(cached.data)) return null;
+    return cached;
   } catch {
     return null;
   }
+}
+
+function getLocalCache(): BootstrapData | null {
+  return readLocalCacheEntry()?.data ?? null;
 }
 
 function setLocalCache(data: BootstrapData): void {
@@ -90,13 +94,39 @@ function setLocalCache(data: BootstrapData): void {
   }
 }
 
-async function fetchBootstrap(forceRefresh = false): Promise<BootstrapData | null> {
+// The failure backoff is persisted so full page reloads honour it too.
+function getRetryAt(): number {
   try {
-    const url = forceRefresh ? `/api/bootstrap?refresh=true&t=${Date.now()}` : `/api/bootstrap`;
-    const res = await fetch(url);
+    return Number(localStorage.getItem(RETRY_AT_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function setRetryAt(timestamp: number): void {
+  try {
+    localStorage.setItem(RETRY_AT_KEY, String(timestamp));
+  } catch {
+    // Unavailable storage just means no cross-reload backoff.
+  }
+}
+
+/**
+ * An outage (e.g. a paused database) can surface as `success: true` with every
+ * list empty. Such a response must never replace good data or be cached.
+ */
+function looksLikeFailure(data: BootstrapData | null | undefined): boolean {
+  if (!data) return true;
+  const isEmpty = (list: unknown) => !Array.isArray(list) || list.length === 0;
+  return isEmpty(data.products) && isEmpty(data.categories) && isEmpty(data.collections);
+}
+
+async function fetchBootstrap(): Promise<BootstrapData | null> {
+  try {
+    const res = await fetch('/api/bootstrap');
     if (!res.ok) throw new Error(`Bootstrap API ${res.status}`);
     const json = await res.json();
-    if (json.success && json.data) {
+    if (json.success && !looksLikeFailure(json.data)) {
       return json.data as BootstrapData;
     }
     return null;
@@ -106,35 +136,54 @@ async function fetchBootstrap(forceRefresh = false): Promise<BootstrapData | nul
   }
 }
 
-function triggerBackgroundRevalidate(force = false) {
-  if (bootstrapPromise) return;
-  bootstrapPromise = fetchBootstrap(force).then(data => {
-    if (data) {
+/** Fetch fresh data (deduplicated). Resolves to the best data available, even when the fetch fails. */
+function refreshBootstrap(): Promise<BootstrapData | null> {
+  if (!bootstrapPromise) {
+    bootstrapPromise = fetchBootstrap().then(data => {
+      bootstrapPromise = null;
+      if (!data) {
+        lastFailureAt = Date.now();
+        setRetryAt(lastFailureAt + FAILURE_BACKOFF);
+        return bootstrapData;
+      }
       bootstrapData = data;
+      bootstrapStoredAt = Date.now();
       setLocalCache(data);
       notifyListeners();
-    }
-    bootstrapPromise = null;
-    return data;
-  });
+      return data;
+    });
+  }
+  return bootstrapPromise;
+}
+
+function maybeRevalidateInBackground() {
+  if (backgroundRevalidateStarted || bootstrapPromise) return;
+  if (Date.now() - bootstrapStoredAt <= CACHE_TTL) return;
+  if (Date.now() < getRetryAt()) return;
+  backgroundRevalidateStarted = true;
+  setTimeout(() => {
+    void refreshBootstrap();
+  }, 100);
 }
 
 function ensureBootstrap(): Promise<BootstrapData | null> {
-  // Check localStorage first
-  const cached = getLocalCache();
-  if (cached) {
-    if (!bootstrapData) {
-      bootstrapData = cached;
+  if (!bootstrapData) {
+    const cached = readLocalCacheEntry();
+    if (cached) {
+      bootstrapData = cached.data;
+      bootstrapStoredAt = cached.storedAt;
       notifyListeners();
     }
-    return Promise.resolve(cached);
   }
 
-  // Only revalidate if no cache exists
-  triggerBackgroundRevalidate();
-  
-  if (bootstrapData) return Promise.resolve(bootstrapData);
-  return bootstrapPromise || Promise.resolve(null);
+  // Serve cached data immediately; refresh it in the background if stale.
+  if (bootstrapData) {
+    maybeRevalidateInBackground();
+    return Promise.resolve(bootstrapData);
+  }
+
+  if (Date.now() - lastFailureAt < FAILURE_BACKOFF) return Promise.resolve(null);
+  return refreshBootstrap();
 }
 
 // ─── React hook ──────────────────────────────────────────────────────
@@ -154,14 +203,12 @@ export function useBootstrap(): { data: BootstrapData | null; loading: boolean; 
     };
     bootstrapListeners.push(listener);
 
-    if (!bootstrapData) {
-      ensureBootstrap().then(() => {
-        if (mountedRef.current) {
-          setData(bootstrapData);
-          setLoading(false);
-        }
-      });
-    }
+    ensureBootstrap().then(() => {
+      if (mountedRef.current) {
+        setData(bootstrapData);
+        setLoading(false);
+      }
+    });
 
     return () => {
       mountedRef.current = false;
@@ -170,13 +217,8 @@ export function useBootstrap(): { data: BootstrapData | null; loading: boolean; 
   }, []);
 
   const refetch = useCallback(() => {
-    bootstrapData = null;
-    bootstrapPromise = null;
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem(STORAGE_KEY);
-    }
     setLoading(true);
-    ensureBootstrap().then(() => {
+    refreshBootstrap().then(() => {
       if (mountedRef.current) {
         setData(bootstrapData);
         setLoading(false);
@@ -188,86 +230,102 @@ export function useBootstrap(): { data: BootstrapData | null; loading: boolean; 
 }
 
 // ─── Typed data hooks (same API surface as before) ───────────────────
+// Outputs are memoized on the bootstrap arrays so consumers get stable
+// references (safe to use as effect / memo dependencies).
 
 export function useProducts() {
   const { data: boot, loading, refetch } = useBootstrap();
-  const products = boot?.products || [];
+  const products = boot?.products;
 
-  const normalized = products
-    .filter((p: Product) => {
-      const raw = p as unknown as Record<string, unknown>;
-      if (raw.isActive === false) return false;
-      if (Array.isArray(p.badges) && (p.badges.includes('HIDDEN') || p.badges.includes('DISABLED'))) return false;
-      return true;
-    })
-    .map((p: Product, idx: number) => {
-      const raw = p as unknown as Record<string, unknown>;
-      return {
-        ...p,
-        id: String(raw.id || raw.$id || raw.slug || `prod-${idx}`),
-        sizes: Array.isArray(p.sizes) ? p.sizes : ['S', 'M', 'L', 'XL', 'XXL'],
-        images: Array.isArray(p.images) ? p.images : [],
-        badges: Array.isArray(p.badges) ? p.badges : [],
-      } as Product;
-    });
+  const normalized = useMemo(
+    () =>
+      (products || [])
+        .filter((p: Product) => {
+          const raw = p as unknown as Record<string, unknown>;
+          if (raw.isActive === false) return false;
+          if (Array.isArray(p.badges) && (p.badges.includes('HIDDEN') || p.badges.includes('DISABLED'))) return false;
+          return true;
+        })
+        .map((p: Product, idx: number) => {
+          const raw = p as unknown as Record<string, unknown>;
+          return {
+            ...p,
+            id: String(raw.id || raw.$id || raw.slug || `prod-${idx}`),
+            sizes: Array.isArray(p.sizes) ? p.sizes : ['S', 'M', 'L', 'XL', 'XXL'],
+            images: Array.isArray(p.images) ? p.images : [],
+            badges: Array.isArray(p.badges) ? p.badges : [],
+          } as Product;
+        }),
+    [products]
+  );
 
   return { data: normalized, loading, error: null, refetch };
 }
 
 export function useProduct(slug: string) {
   const { data: boot, loading, refetch } = useBootstrap();
-  const products = boot?.products || [];
+  const products = boot?.products;
 
-  const p = products.find((prod: Product) => {
-    const raw = prod as unknown as Record<string, unknown>;
-    const matches = prod.slug === slug || raw.$id === slug;
-    if (!matches) return false;
-    if (raw.isActive === false) return false;
-    if (Array.isArray(prod.badges) && (prod.badges.includes('HIDDEN') || prod.badges.includes('DISABLED'))) return false;
-    return true;
-  }) || null;
+  const normalized = useMemo(() => {
+    const p = (products || []).find((prod: Product) => {
+      const raw = prod as unknown as Record<string, unknown>;
+      const matches = prod.slug === slug || raw.$id === slug;
+      if (!matches) return false;
+      if (raw.isActive === false) return false;
+      if (Array.isArray(prod.badges) && (prod.badges.includes('HIDDEN') || prod.badges.includes('DISABLED'))) return false;
+      return true;
+    }) || null;
 
-  const raw = p as unknown as Record<string, unknown> | null;
-  const normalized = p && raw
-    ? ({
-        ...p,
-        id: String(raw.id || raw.$id || raw.slug || slug),
-        sizes: Array.isArray(p.sizes) ? p.sizes : ['S', 'M', 'L', 'XL', 'XXL'],
-        images: Array.isArray(p.images) ? p.images : [],
-        badges: Array.isArray(p.badges) ? p.badges : [],
-      } as Product)
-    : null;
+    const raw = p as unknown as Record<string, unknown> | null;
+    return p && raw
+      ? ({
+          ...p,
+          id: String(raw.id || raw.$id || raw.slug || slug),
+          sizes: Array.isArray(p.sizes) ? p.sizes : ['S', 'M', 'L', 'XL', 'XXL'],
+          images: Array.isArray(p.images) ? p.images : [],
+          badges: Array.isArray(p.badges) ? p.badges : [],
+        } as Product)
+      : null;
+  }, [products, slug]);
 
   return { data: normalized, loading, error: null, refetch };
 }
 
 export function useCollections() {
   const { data: boot, loading, refetch } = useBootstrap();
-  const collections = boot?.collections || [];
+  const collections = boot?.collections;
 
-  const normalized = collections.map((c: Collection, idx: number) => {
-    const raw = c as unknown as Record<string, unknown>;
-    return {
-      ...c,
-      id: String(raw.id || raw.$id || raw.slug || `col-${idx}`),
-      productIds: Array.isArray(c.productIds) ? c.productIds : [],
-    } as Collection;
-  });
+  const normalized = useMemo(
+    () =>
+      (collections || []).map((c: Collection, idx: number) => {
+        const raw = c as unknown as Record<string, unknown>;
+        return {
+          ...c,
+          id: String(raw.id || raw.$id || raw.slug || `col-${idx}`),
+          productIds: Array.isArray(c.productIds) ? c.productIds : [],
+        } as Collection;
+      }),
+    [collections]
+  );
 
   return { data: normalized, loading, error: null, refetch };
 }
 
 export function useCategories() {
   const { data: boot, loading, refetch } = useBootstrap();
-  const categories = boot?.categories || [];
+  const categories = boot?.categories;
 
-  const normalized = categories.map((c: Category, idx: number) => {
-    const raw = c as unknown as Record<string, unknown>;
-    return {
-      ...c,
-      id: String(raw.id || raw.$id || raw.slug || `cat-${idx}`),
-    } as Category;
-  });
+  const normalized = useMemo(
+    () =>
+      (categories || []).map((c: Category, idx: number) => {
+        const raw = c as unknown as Record<string, unknown>;
+        return {
+          ...c,
+          id: String(raw.id || raw.$id || raw.slug || `cat-${idx}`),
+        } as Category;
+      }),
+    [categories]
+  );
 
   return { data: normalized, loading, error: null, refetch };
 }
@@ -296,7 +354,7 @@ const STAR_META: Record<string, { title: string; tagline: string; image: string 
 export function useStarCollections(): StarCollection[] {
   const { data: collections } = useCollections();
 
-  const stars: StarCollection[] = STAR_SLUGS.map((slug) => {
+  return useMemo(() => STAR_SLUGS.map((slug) => {
     const col = collections.find((c: Collection) => c.slug === slug);
     const meta = STAR_META[slug];
     const name = col?.name?.replace(' Collection', '') || meta?.title?.split(' ').slice(0, -1).join(' ') || slug;
@@ -309,9 +367,7 @@ export function useStarCollections(): StarCollection[] {
       image: meta?.image || '6a7fa922002c9b023447',
       count: `${productCount} DROPS`,
     };
-  });
-
-  return stars;
+  }), [collections]);
 }
 
 // ─── Bootstrap homepage data accessor (for cms-store) ────────────────
@@ -320,41 +376,3 @@ export function getBootstrapHomepage(): Record<string, unknown> | null {
   const cached = getLocalCache();
   return cached?.homepage || null;
 }
-
-// Re-export for backward compat
-function useApiData<T>(endpoint: string, fallback: T): { data: T; loading: boolean; error: string | null; refetch: () => void } {
-  const [data, setData] = useState<T>(fallback);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const fetchedRef = useRef(false);
-
-  const fetchData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const res = await fetch(endpoint);
-      if (!res.ok) throw new Error(`API ${res.status}`);
-      const json = await res.json();
-      if (json.success && json.data) {
-        setData(json.data);
-        setError(null);
-      } else if (json.error) {
-        throw new Error(json.error);
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Fetch failed';
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
-  }, [endpoint]);
-
-  useEffect(() => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
-    fetchData();
-  }, [endpoint, fetchData]);
-
-  return { data, loading, error, refetch: fetchData };
-}
-
-export { useApiData };

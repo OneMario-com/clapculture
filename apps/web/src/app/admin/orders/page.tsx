@@ -2,7 +2,7 @@
 'use client';
 
 import Link from 'next/link';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { formatCurrency, resolveImageUrl } from '@/lib/utils';
 
 interface OrderItem {
@@ -81,6 +81,55 @@ const QUICK_TABS = [
   { id: 'ARCHIVED', label: '📦 Archived' },
 ];
 
+function mapOrderDoc(doc: Record<string, unknown>): AdminOrder {
+  let customerObj: OrderCustomer = {};
+  if (typeof doc.customer === 'string') {
+    try { customerObj = JSON.parse(doc.customer as string); } catch {}
+  } else if (doc.customer && typeof doc.customer === 'object') {
+    customerObj = doc.customer as OrderCustomer;
+  }
+
+  let itemsList: OrderItem[] = [];
+  if (typeof doc.items === 'string') {
+    try { itemsList = JSON.parse(doc.items as string); } catch {}
+  } else if (Array.isArray(doc.items)) {
+    itemsList = doc.items as OrderItem[];
+  }
+
+  const totalQty = itemsList.reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
+  const totalNum = Number(doc.total) || 0;
+
+  const createdAtStr = String(doc.$createdAt || doc.createdAt || new Date().toISOString());
+
+  return {
+    id: String(doc.orderId || doc.$id || '').replace('#', ''),
+    docId: String(doc.$id || doc.orderId || ''),
+    customer: customerObj,
+    customerName: customerObj.fullName || 'Valued Rebel',
+    email: customerObj.email || 'customer@example.com',
+    phone: customerObj.phone || '',
+    city: customerObj.city || '',
+    items: itemsList,
+    itemCount: itemsList.length,
+    totalQuantity: totalQty,
+    total: totalNum,
+    subtotal: Number(doc.subtotal) || totalNum,
+    shipping: Number(doc.shipping) || 0,
+    paymentStatus: String(doc.paymentStatus || 'PENDING'),
+    orderStatus: String(doc.orderStatus || 'PLACED'),
+    transactionId: String(doc.transactionId || ''),
+    trackingNumber: String(doc.trackingNumber || ''),
+    screenshotUrl: String(doc.screenshotUrl || customerObj.screenshotUrl || customerObj.paymentProof || ''),
+    createdAt: createdAtStr,
+    dateFormatted: new Date(createdAtStr).toLocaleDateString('en-IN', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    }),
+    isArchived: Boolean(doc.isArchived),
+  };
+}
+
 export default function OrdersPage() {
   const [orders, setOrders] = useState<AdminOrder[]>([]);
   const [loading, setLoading] = useState(true);
@@ -112,9 +161,16 @@ export default function OrdersPage() {
 
   const [sortBy, setSortBy] = useState<string>('newest');
 
-  // Preview Modal / Drawer State
-  const [previewOrder, setPreviewOrder] = useState<AdminOrder | null>(null);
-  const [copiedText, setCopiedText] = useState<string | null>(null);
+  // Preview Modal / Drawer State (store the id; the order itself is derived from the live list)
+  const [previewOrderId, setPreviewOrderId] = useState<string | null>(null);
+  const [, setCopiedText] = useState<string | null>(null);
+  const [verifyingIds, setVerifyingIds] = useState<string[]>([]);
+  const verifyingRef = useRef<Set<string>>(new Set());
+  const loadSeqRef = useRef(0);
+  const previewOrder = useMemo(
+    () => (previewOrderId ? orders.find((o) => (o.docId || o.id) === previewOrderId) ?? null : null),
+    [orders, previewOrderId]
+  );
   const [toast, setToast] = useState<{ show: boolean; msg: string; isError?: boolean }>({ show: false, msg: '' });
 
   const showToast = (msg: string, isError = false) => {
@@ -129,78 +185,40 @@ export default function OrdersPage() {
     setTimeout(() => setCopiedText(null), 2000);
   };
 
+  // Callers that want the spinner set `loading` first (initial state is already loading)
   const loadOrders = async () => {
+    const seq = ++loadSeqRef.current;
     try {
-      setLoading(true);
       const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
       const res = await fetch('/api/orders?limit=250&includePending=true&archived=all', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
+      // Ignore out-of-order responses from older requests
+      if (seq !== loadSeqRef.current) return;
       if (res.ok) {
         const data = await res.json();
+        if (seq !== loadSeqRef.current) return;
         if (data.success && Array.isArray(data.data)) {
-          const mapped: AdminOrder[] = data.data.map((doc: Record<string, unknown>) => {
-            let customerObj: OrderCustomer = {};
-            if (typeof doc.customer === 'string') {
-              try { customerObj = JSON.parse(doc.customer as string); } catch {}
-            } else if (doc.customer && typeof doc.customer === 'object') {
-              customerObj = doc.customer as OrderCustomer;
-            }
-
-            let itemsList: OrderItem[] = [];
-            if (typeof doc.items === 'string') {
-              try { itemsList = JSON.parse(doc.items as string); } catch {}
-            } else if (Array.isArray(doc.items)) {
-              itemsList = doc.items as OrderItem[];
-            }
-
-            const totalQty = itemsList.reduce((sum, item) => sum + (Number(item.quantity) || 1), 0);
-            const totalNum = Number(doc.total) || 0;
-
-            const createdAtStr = String(doc.$createdAt || doc.createdAt || new Date().toISOString());
-
-            return {
-              id: String(doc.orderId || doc.$id || '').replace('#', ''),
-              docId: String(doc.$id || doc.orderId || ''),
-              customer: customerObj,
-              customerName: customerObj.fullName || 'Valued Rebel',
-              email: customerObj.email || 'customer@example.com',
-              phone: customerObj.phone || '',
-              city: customerObj.city || '',
-              items: itemsList,
-              itemCount: itemsList.length,
-              totalQuantity: totalQty,
-              total: totalNum,
-              subtotal: Number(doc.subtotal) || totalNum,
-              shipping: Number(doc.shipping) || 0,
-              paymentStatus: String(doc.paymentStatus || 'PENDING'),
-              orderStatus: String(doc.orderStatus || 'PLACED'),
-              transactionId: String(doc.transactionId || ''),
-              trackingNumber: String(doc.trackingNumber || ''),
-              screenshotUrl: String(doc.screenshotUrl || customerObj.screenshotUrl || customerObj.paymentProof || ''),
-              createdAt: createdAtStr,
-              dateFormatted: new Date(createdAtStr).toLocaleDateString('en-IN', {
-                day: 'numeric',
-                month: 'short',
-                year: 'numeric',
-              }),
-              isArchived: Boolean(doc.isArchived),
-            };
-          });
+          const mapped: AdminOrder[] = data.data.map((doc: Record<string, unknown>) => mapOrderDoc(doc));
           setOrders(mapped);
         }
       } else {
         showToast('Failed to load orders from database', true);
       }
     } catch {
-      showToast('Error connecting to server', true);
+      if (seq === loadSeqRef.current) showToast('Error connecting to server', true);
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   };
 
-  useEffect(() => {
+  const refreshOrders = () => {
+    setLoading(true);
     loadOrders();
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => loadOrders(), 0);
     // Fetch categories list
     fetch('/api/categories')
       .then((res) => res.json())
@@ -213,6 +231,8 @@ export default function OrdersPage() {
         }
       })
       .catch(() => {});
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Extract all distinct product names across all orders and catalog
@@ -513,30 +533,44 @@ export default function OrdersPage() {
   }, [filteredOrders, orders]);
 
   // Quick verify handler
-  const handleQuickVerify = async (orderId: string, e: React.MouseEvent) => {
+  const handleQuickVerify = async (order: AdminOrder, e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    const rowId = order.docId || order.id;
+    // In-flight guard: a double-click must not send the update twice
+    if (verifyingRef.current.has(rowId)) return;
+    verifyingRef.current.add(rowId);
+    setVerifyingIds((prev) => [...prev, rowId]);
     try {
       const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch(`/api/orders/${orderId}/status`, {
+      const updates: Record<string, string> = { paymentStatus: 'VERIFIED' };
+      // Only confirm a freshly placed order; never roll back one that is further along
+      if (order.orderStatus === 'PLACED') updates.orderStatus = 'CONFIRMED';
+      const res = await fetch(`/api/orders/${encodeURIComponent(rowId)}/status`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({
-          paymentStatus: 'VERIFIED',
-          orderStatus: 'CONFIRMED',
-        }),
+        body: JSON.stringify(updates),
       });
-      if (res.ok) {
-        showToast(`Order #${orderId} verified and confirmed!`);
-        loadOrders();
+      const json = await res.json().catch(() => null);
+      if (res.ok && json?.success) {
+        // Patch just this row from the updated document instead of reloading the whole list
+        const updated =
+          json.data && typeof json.data === 'object'
+            ? mapOrderDoc(json.data as Record<string, unknown>)
+            : { ...order, ...updates };
+        setOrders((prev) => prev.map((o) => ((o.docId || o.id) === rowId ? { ...o, ...updated } : o)));
+        showToast(`Order #${order.id} verified and confirmed!`);
       } else {
-        showToast('Failed to verify order', true);
+        showToast(json?.error || 'Failed to verify order', true);
       }
     } catch {
       showToast('Error updating order status', true);
+    } finally {
+      verifyingRef.current.delete(rowId);
+      setVerifyingIds((prev) => prev.filter((id) => id !== rowId));
     }
   };
 
@@ -562,9 +596,6 @@ export default function OrdersPage() {
         setOrders((prev) =>
           prev.map((o) => (o.docId === docId || o.id === docId ? { ...o, isArchived: shouldArchive } : o))
         );
-        if (previewOrder && (previewOrder.docId === docId || previewOrder.id === docId)) {
-          setPreviewOrder((prev) => (prev ? { ...prev, isArchived: shouldArchive } : null));
-        }
         showToast(shouldArchive ? '📦 Order archived successfully!' : '📂 Order restored to active list!');
       } else {
         showToast(json.error || 'Failed to update archive status', true);
@@ -574,9 +605,18 @@ export default function OrdersPage() {
     }
   };
 
+  // Only act on selected orders that are visible under the current tab / filters / search
+  const visibleSelectedIds = useMemo(
+    () => filteredOrders.map((o) => o.docId || o.id).filter((id) => selectedOrders.includes(id)),
+    [filteredOrders, selectedOrders]
+  );
+  const allFilteredSelected =
+    filteredOrders.length > 0 && filteredOrders.every((o) => selectedOrders.includes(o.docId || o.id));
+
   // Bulk Archive / Unarchive Handler
   const handleBulkArchive = async (shouldArchive: boolean) => {
-    if (selectedOrders.length === 0) return;
+    const targetIds = visibleSelectedIds;
+    if (targetIds.length === 0) return;
     try {
       const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
       const res = await fetch('/api/orders/bulk-archive', {
@@ -585,18 +625,18 @@ export default function OrdersPage() {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ orderIds: selectedOrders, isArchived: shouldArchive }),
+        body: JSON.stringify({ orderIds: targetIds, isArchived: shouldArchive }),
       });
 
-      const json = await res.json();
-      if (res.ok && json.success) {
+      const json = await res.json().catch(() => null);
+      if (res.ok && json?.success) {
         setOrders((prev) =>
-          prev.map((o) => (selectedOrders.includes(o.docId) || selectedOrders.includes(o.id) ? { ...o, isArchived: shouldArchive } : o))
+          prev.map((o) => (targetIds.includes(o.docId || o.id) ? { ...o, isArchived: shouldArchive } : o))
         );
-        showToast(shouldArchive ? `📦 Archived ${selectedOrders.length} order(s)!` : `📂 Restored ${selectedOrders.length} order(s)!`);
+        showToast(shouldArchive ? `📦 Archived ${targetIds.length} order(s)!` : `📂 Restored ${targetIds.length} order(s)!`);
         setSelectedOrders([]);
       } else {
-        showToast(json.error || 'Failed to bulk archive orders', true);
+        showToast(json?.error || 'Failed to bulk archive orders', true);
       }
     } catch {
       showToast('Error connecting to server', true);
@@ -611,7 +651,7 @@ export default function OrdersPage() {
   };
 
   const toggleSelectAll = () => {
-    if (selectedOrders.length === filteredOrders.length && filteredOrders.length > 0) {
+    if (allFilteredSelected) {
       setSelectedOrders([]);
     } else {
       setSelectedOrders(filteredOrders.map((o) => o.docId || o.id));
@@ -771,7 +811,7 @@ export default function OrdersPage() {
           </button>
 
           <button
-            onClick={loadOrders}
+            onClick={refreshOrders}
             className="p-2.5 rounded-xl bg-[#1a1a1a] hover:bg-[#262626] text-white border border-[#262626] hover:border-white transition-colors cursor-pointer"
             title="Refresh Orders"
           >
@@ -1298,7 +1338,7 @@ export default function OrdersPage() {
                   <th className="p-4 w-10 text-center">
                     <input
                       type="checkbox"
-                      checked={filteredOrders.length > 0 && selectedOrders.length === filteredOrders.length}
+                      checked={allFilteredSelected}
                       onChange={toggleSelectAll}
                       className="accent-electric-lime w-4 h-4 rounded cursor-pointer"
                       title="Select all filtered orders"
@@ -1323,7 +1363,7 @@ export default function OrdersPage() {
                       className={`hover:bg-[#1a1a1a] transition-colors group cursor-pointer ${
                         isSelected ? 'bg-electric-lime/5' : ''
                       }`}
-                      onClick={() => setPreviewOrder(order)}
+                      onClick={() => setPreviewOrderId(order.docId || order.id)}
                     >
                       {/* Selection Checkbox */}
                       <td className="p-4 align-top w-10 text-center" onClick={(e) => e.stopPropagation()}>
@@ -1475,12 +1515,13 @@ export default function OrdersPage() {
                         <div className="flex items-center justify-end gap-2">
                           {order.paymentStatus === 'SUBMITTED' && (
                             <button
-                              onClick={(e) => handleQuickVerify(order.docId || order.id, e)}
-                              className="text-xs bg-green-500/20 hover:bg-green-500 text-green-400 hover:text-black border border-green-500/30 px-3 py-1.5 rounded-lg font-mono font-bold transition-all flex items-center gap-1 cursor-pointer"
+                              onClick={(e) => handleQuickVerify(order, e)}
+                              disabled={verifyingIds.includes(order.docId || order.id)}
+                              className="text-xs bg-green-500/20 hover:bg-green-500 text-green-400 hover:text-black border border-green-500/30 px-3 py-1.5 rounded-lg font-mono font-bold transition-all flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-wait"
                               title="Verify payment and confirm order"
                             >
                               <span className="material-symbols-outlined text-[14px]">check_circle</span>
-                              <span>Verify</span>
+                              <span>{verifyingIds.includes(order.docId || order.id) ? 'Verifying...' : 'Verify'}</span>
                             </button>
                           )}
 
@@ -1535,11 +1576,11 @@ export default function OrdersPage() {
       </div>
 
       {/* Floating Bulk Actions Bar */}
-      {selectedOrders.length > 0 && (
+      {visibleSelectedIds.length > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-[#1a1a1a] border border-electric-lime/50 shadow-[0_10px_35px_rgba(0,0,0,0.9)] rounded-2xl px-5 py-3 flex items-center gap-4 animate-in slide-in-from-bottom-4 duration-200">
           <div className="flex items-center gap-2 text-xs font-mono font-bold text-white">
             <span className="w-2 h-2 rounded-full bg-electric-lime animate-pulse" />
-            <span>{selectedOrders.length} order{selectedOrders.length > 1 ? 's' : ''} selected</span>
+            <span>{visibleSelectedIds.length} order{visibleSelectedIds.length > 1 ? 's' : ''} selected</span>
           </div>
 
           <div className="h-4 w-px bg-[#333]" />
@@ -1575,7 +1616,7 @@ export default function OrdersPage() {
       {previewOrder && (
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setPreviewOrder(null)}
+          onClick={() => setPreviewOrderId(null)}
         >
           <div
             className="bg-[#141414] border border-[#262626] rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 md:p-8 space-y-6 shadow-2xl animate-in zoom-in-95 duration-150"
@@ -1602,7 +1643,7 @@ export default function OrdersPage() {
               </div>
 
               <button
-                onClick={() => setPreviewOrder(null)}
+                onClick={() => setPreviewOrderId(null)}
                 className="p-1 rounded-lg text-gray-400 hover:text-white bg-[#222] hover:bg-[#333]"
               >
                 <span className="material-symbols-outlined text-lg">close</span>
@@ -1703,8 +1744,8 @@ export default function OrdersPage() {
               {previewOrder.paymentStatus === 'SUBMITTED' && (
                 <button
                   onClick={(e) => {
-                    handleQuickVerify(previewOrder.docId || previewOrder.id, e);
-                    setPreviewOrder(null);
+                    handleQuickVerify(previewOrder, e);
+                    setPreviewOrderId(null);
                   }}
                   className="flex-1 bg-green-500 hover:bg-green-400 text-black font-mono font-bold text-xs py-3 rounded-xl uppercase transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                 >

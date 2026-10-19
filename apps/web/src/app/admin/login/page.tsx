@@ -22,17 +22,29 @@ export default function AdminLogin() {
         body: JSON.stringify({ username: email, password }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
 
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Invalid credentials');
+      if (!res.ok || !data?.success || !data.data?.token) {
+        throw new Error(
+          data?.error ||
+            (res.status === 429
+              ? 'Too many login attempts. Please wait and try again.'
+              : res.status >= 500
+                ? 'Login is temporarily unavailable. Please try again later.'
+                : 'Invalid email or password')
+        );
       }
 
       // Store authenticated JWT token
       localStorage.setItem('adminToken', data.data.token);
       router.push('/admin/dashboard');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Login failed. Please check credentials.';
+      const msg =
+        err instanceof TypeError
+          ? 'Could not reach the server. Check your connection and try again.'
+          : err instanceof Error
+            ? err.message
+            : 'Login failed. Please check credentials.';
       setErrorMsg(msg);
     } finally {
       setIsLoading(false);

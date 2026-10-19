@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useSyncExternalStore, ReactNode } from 'react';
 import { CartItem, OrderStatus, PaymentStatus } from '@clapculture/shared';
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ interface OrderStoreContextType {
   // Current order
   currentOrder: OrderData | null;
   createOrder: (orderId: string, items: CartItem[], subtotal: number, shipping: number, customer: CheckoutInfo) => void;
-  updatePaymentInfo: (transactionId: string, screenshotUrl?: string) => void;
+  completeOrder: (draftOrderId: string, saved: Partial<OrderData> & { orderId: string }) => void;
   getOrder: (orderId: string) => OrderData | null;
 
   // Order history (session-based)
@@ -56,6 +56,9 @@ const emptyCheckoutInfo: CheckoutInfo = {
   state: '',
   pincode: '',
 };
+
+const normalizeOrderId = (orderId: string) => String(orderId || '').replace('#', '').trim().toUpperCase();
+const isSameOrderId = (a: string, b: string) => normalizeOrderId(a) === normalizeOrderId(b);
 
 const OrderStoreContext = createContext<OrderStoreContextType | undefined>(undefined);
 
@@ -148,28 +151,35 @@ export function OrderStoreProvider({ children }: { children: ReactNode }) {
       createdAt: new Date().toISOString(),
     };
     setCurrentOrder(order);
-    setOrders((prev) => [...prev, order]);
+    // Replace (never duplicate) an entry with the same id: a second checkout that
+    // reused an id used to leave the old cart first in the list, so the payment
+    // page showed — and submitted — the previous cart's items.
+    setOrders((prev) => [...prev.filter((o) => !isSameOrderId(o.orderId, orderId)), order]);
   };
 
-  const updatePaymentInfo = (transactionId: string, screenshotUrl?: string) => {
-    if (!currentOrder) return;
-    const updated: OrderData = {
-      ...currentOrder,
-      transactionId,
-      screenshotUrl,
-      paymentStatus: 'SUBMITTED',
+  // Called once the server has saved the order. The saved order number can
+  // differ from the one reserved at checkout (if that number was taken).
+  const completeOrder = (draftOrderId: string, saved: Partial<OrderData> & { orderId: string }) => {
+    const draft = orders.find((o) => isSameOrderId(o.orderId, draftOrderId)) || null;
+    const base = draft || (currentOrder && isSameOrderId(currentOrder.orderId, draftOrderId) ? currentOrder : null);
+    const completed: OrderData = {
+      ...(base || ({} as OrderData)),
+      ...saved,
+      orderId: saved.orderId.replace('#', '').trim(),
+      paymentStatus: saved.paymentStatus || 'SUBMITTED',
     };
-    setCurrentOrder(updated);
-    setOrders((prev) =>
-      prev.map((o) => (o.orderId === updated.orderId ? updated : o))
-    );
+    setCurrentOrder(completed);
+    setOrders((prev) => [
+      ...prev.filter((o) => !isSameOrderId(o.orderId, draftOrderId) && !isSameOrderId(o.orderId, completed.orderId)),
+      completed,
+    ]);
   };
 
   const getOrder = (orderId: string): OrderData | null => {
-    const clean = orderId.replace('#', '').trim();
-    const found = orders.find((o) => o.orderId.replace('#', '').trim() === clean);
+    // Newest first, in case older sessions stored duplicates.
+    const found = [...orders].reverse().find((o) => isSameOrderId(o.orderId, orderId));
     if (found) return found;
-    if (currentOrder && currentOrder.orderId.replace('#', '').trim() === clean) {
+    if (currentOrder && isSameOrderId(currentOrder.orderId, orderId)) {
       return currentOrder;
     }
     return null;
@@ -183,13 +193,23 @@ export function OrderStoreProvider({ children }: { children: ReactNode }) {
         setCheckoutInfo,
         currentOrder,
         createOrder,
-        updatePaymentInfo,
+        completeOrder,
         getOrder,
         orders,
       },
     },
     children
   );
+}
+
+const noopSubscribe = () => () => {};
+
+/**
+ * False during server rendering and hydration, true afterwards. Pages that
+ * render from browser-only order data use it to avoid hydration mismatches.
+ */
+export function useIsClient(): boolean {
+  return useSyncExternalStore(noopSubscribe, () => true, () => false);
 }
 
 export function useOrderStore() {

@@ -12,26 +12,40 @@ function TrackOrderContent() {
   const urlOrderId = useMemo(() => (searchParams.get('orderId') || '').replace('#', '').trim(), [searchParams]);
   const urlEmail = useMemo(() => searchParams.get('email') || '', [searchParams]);
 
-  const { getOrder, currentOrder } = useOrderStore();
+  const { getOrder } = useOrderStore();
   const [orderId, setOrderId] = useState(urlOrderId);
   const [email, setEmail] = useState(urlEmail);
   const [dbOrder, setDbOrder] = useState<OrderData | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
-  const fetchDbOrder = async (searchId: string) => {
+  // Orders are only shown to someone who knows the email or phone number used
+  // for them, so an order number alone can't reveal another customer's details.
+  const fetchDbOrder = async (searchId: string, contact: string) => {
     if (!searchId.trim()) return;
+    if (!contact.trim()) {
+      setErrorMessage('Please enter the email address or mobile number used for this order.');
+      return;
+    }
     setLoading(true);
     setErrorMessage('');
     const cleanId = searchId.replace('#', '').trim();
 
     try {
-      const res = await fetch(`/api/orders/${cleanId}?t=${Date.now()}`, {
+      const res = await fetch(`/api/orders/${encodeURIComponent(cleanId)}?contact=${encodeURIComponent(contact.trim())}`, {
         cache: 'no-store',
         headers: { 'Cache-Control': 'no-cache' }
       });
+      const json = await res.json().catch(() => ({}));
+      if (res.status === 403) {
+        setErrorMessage('The email or mobile number does not match this order.');
+        return;
+      }
+      if (res.status === 404) {
+        setErrorMessage(`Order #${cleanId} not found. Please verify the order number.`);
+        return;
+      }
       if (res.ok) {
-        const json = await res.json();
         if (json.success && json.data) {
           const doc = json.data;
           
@@ -64,16 +78,11 @@ function TrackOrderContent() {
         }
       }
 
-      // Local fallback
-      const local = getOrder(cleanId) || (currentOrder?.orderId === cleanId ? currentOrder : null);
-      if (local) {
-        setDbOrder(local);
-      } else {
-        setErrorMessage(`Order #${cleanId} not found. Please verify the order number.`);
-      }
+      setErrorMessage(json.error || 'Unable to load this order right now. Please try again.');
     } catch {
-      const local = getOrder(cleanId) || (currentOrder?.orderId === cleanId ? currentOrder : null);
-      if (local) {
+      // Service unreachable: this device's own copy of the same order is the best we can show.
+      const local = getOrder(cleanId);
+      if (local && local.paymentStatus !== 'PENDING') {
         setDbOrder(local);
       } else {
         setErrorMessage('Unable to connect to order tracking service. Please try again.');
@@ -84,16 +93,24 @@ function TrackOrderContent() {
   };
 
   useEffect(() => {
-    if (urlOrderId) {
-      setTimeout(() => fetchDbOrder(urlOrderId), 0);
-    }
+    if (!urlOrderId) return;
+    // Links from the confirmation page carry only the order number; the contact
+    // comes from this device's own copy of that order, when it has one.
+    const contact = urlEmail || getOrder(urlOrderId)?.customer?.email || '';
+    const timer = setTimeout(() => {
+      if (contact) {
+        setEmail(contact);
+        fetchDbOrder(urlOrderId, contact);
+      }
+    }, 0);
+    return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlOrderId]);
 
   const handleTrack = (e: React.FormEvent) => {
     e.preventDefault();
     if (!orderId.trim()) return;
-    fetchDbOrder(orderId);
+    fetchDbOrder(orderId, email);
   };
 
   const steps = [
@@ -199,11 +216,12 @@ function TrackOrderContent() {
             />
           </div>
           <div>
-            <label className="block text-xs font-label-caps text-gray-400 mb-2 tracking-widest">
-              EMAIL ADDRESS OR MOBILE (OPTIONAL)
+            <label className="block text-xs font-label-caps text-electric-lime mb-2 tracking-widest">
+              EMAIL ADDRESS OR MOBILE USED FOR THE ORDER *
             </label>
-            <input 
-              type="text" 
+            <input
+              type="text"
+              required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="Enter email or mobile number"

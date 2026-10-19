@@ -7,7 +7,7 @@ import { formatCurrency } from '@/lib/utils';
 import Link from 'next/link';
 
 export function CartDrawer() {
-  const { items, isDrawerOpen, setIsDrawerOpen, getCartTotal } = useCart();
+  const { items, isDrawerOpen, setIsDrawerOpen, getCartTotal, getShippingFee } = useCart();
   const [mounted, setMounted] = React.useState(false);
 
   React.useEffect(() => {
@@ -23,7 +23,7 @@ export function CartDrawer() {
   }
 
   const total = getCartTotal();
-  const shippingInfo = useCart().getShippingFee();
+  const shippingInfo = getShippingFee();
   const freeShippingThreshold = 999;
   const progress = Math.min((total / freeShippingThreshold) * 100, 100);
   const remainingForFreeShipping = Math.max(0, freeShippingThreshold - total);

@@ -66,7 +66,8 @@ export default function DiscountsPage() {
   }, []);
 
   useEffect(() => {
-    loadDiscounts();
+    const timer = setTimeout(() => loadDiscounts(), 0);
+    return () => clearTimeout(timer);
   }, [loadDiscounts]);
 
   const filteredDiscounts = discounts.filter(d => d.code.toLowerCase().includes(search.toLowerCase()));

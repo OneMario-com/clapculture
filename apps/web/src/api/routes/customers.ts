@@ -3,6 +3,7 @@ import { ID, Query } from 'node-appwrite';
 import { getAppwriteClient, AppwriteEnv } from '../lib/appwrite';
 import { getDbId, getEnv } from '../lib/utils';
 import { adminAuth } from '../middleware/auth';
+import { listOrdersCached, parseJsonObject } from '../lib/orders';
 
 const customers = new Hono();
 
@@ -68,12 +69,8 @@ export async function upsertCustomerAndUser(
 
     if (existingDocs.documents.length > 0) {
       const doc = existingDocs.documents[0];
-      let ordersList: string[] = [];
-      try {
-        ordersList = typeof doc.orders === 'string' ? JSON.parse(doc.orders) : Array.isArray(doc.orders) ? doc.orders : [];
-      } catch {
-        ordersList = [];
-      }
+      // `orders` is a string-array attribute; older code wrote a JSON string into it, which Appwrite rejected.
+      const ordersList: string[] = Array.isArray(doc.orders) ? [...doc.orders] : [];
       if (customerData.orderId && !ordersList.includes(customerData.orderId)) {
         ordersList.push(customerData.orderId);
       }
@@ -82,7 +79,7 @@ export async function upsertCustomerAndUser(
         firstName: firstName || doc.firstName,
         lastName: lastName || doc.lastName,
         phone: phone || doc.phone,
-        orders: JSON.stringify(ordersList),
+        orders: ordersList.slice(-100),
       });
       return updated;
     } else {
@@ -92,7 +89,7 @@ export async function upsertCustomerAndUser(
         firstName,
         lastName,
         phone: phone || '',
-        orders: JSON.stringify(ordersList),
+        orders: ordersList,
       });
       return created;
     }
@@ -121,8 +118,10 @@ customers.get('/', adminAuth, async (c) => {
   }
 });
 
-// POST /api/customers - Save or update customer details (Public / Storefront / Favorites / Checkout)
-customers.post('/', async (c) => {
+// POST /api/customers - Save or update customer details (Admin).
+// Checkout and newsletter sign-up call upsertCustomerAndUser directly on the server;
+// leaving this public let anyone create Appwrite users and customer records.
+customers.post('/', adminAuth, async (c) => {
   try {
     const body = await c.req.json();
     const env = getEnv(c);
@@ -151,19 +150,21 @@ customers.get('/:id', adminAuth, async (c) => {
       'customers',
       id
     );
-    
-    const orders = await databases.listDocuments(
-      dbId,
-      'orders',
-      [Query.equal('customer.email', (customer as Record<string, unknown>).email as string || '')]
+
+    // `customer` on an order is a JSON string, so it can't be queried by email
+    // (the old Query.equal('customer.email') always failed). Match against the
+    // shared cached order list instead — no extra database read.
+    const email = String(customer.email || '').toLowerCase();
+    const orderHistory = (await listOrdersCached(c)).filter(
+      (o) => String(parseJsonObject(o.customer).email || '').toLowerCase() === email
     );
-    
-    return c.json({ 
-      success: true, 
+
+    return c.json({
+      success: true,
       data: {
         ...customer,
-        orderHistory: orders.documents
-      } 
+        orderHistory
+      }
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Internal server error';

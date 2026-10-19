@@ -43,7 +43,10 @@ export default function SettingsPage() {
   });
 
   useEffect(() => {
-    fetch('/api/settings')
+    const token = localStorage.getItem('adminToken');
+    fetch('/api/settings', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
       .then(res => res.json())
       .then(json => {
         if (json.success && json.data) {

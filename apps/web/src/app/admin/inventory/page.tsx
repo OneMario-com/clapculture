@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 type InventoryItem = {
   id: string;
@@ -18,15 +18,24 @@ export default function InventoryPage() {
   const [filter, setFilter] = useState<'all' | 'in-stock' | 'low-stock' | 'out-of-stock'>('all');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState<string>('');
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Per-product size→stock map as stored in the product document (keeps sizes not listed in `sizes`)
+  const [productSizeStock, setProductSizeStock] = useState<Record<string, { hasSizes: boolean; sizeStock: Record<string, number> }>>({});
+  // Id of the row whose edit has not been committed yet: Enter and the following blur must save only once
+  const pendingEditRef = useRef<string | null>(null);
 
   const loadInventory = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch('/api/products?limit=100');
+      const token = localStorage.getItem('adminToken');
+      const res = await fetch('/api/products?limit=100&includeHidden=true', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
           const items: InventoryItem[] = [];
+          const sizeStockByProduct: Record<string, { hasSizes: boolean; sizeStock: Record<string, number> }> = {};
           data.data.forEach((p: Record<string, unknown>) => {
             const pId = String(p.$id || p.id || '');
             const pName = String(p.name || 'Untitled');
@@ -41,11 +50,19 @@ export default function InventoryPage() {
               } catch {}
             }
 
+            if (!sizeStockMap || typeof sizeStockMap !== 'object') sizeStockMap = {};
+            const hasExactMap = Object.keys(sizeStockMap).length > 0;
+            sizeStockByProduct[pId] = { hasSizes: Array.isArray(p.sizes), sizeStock: sizeStockMap };
+
+            // Without a per-size map, split the total evenly (remainder on the first size) so sizes sum to the total
+            const evenShare = Math.floor(stockTotal / Math.max(1, sizes.length));
             sizes.forEach((sz, idx) => {
               const szStr = String(sz);
-              const exactSizeStock = (sizeStockMap && typeof sizeStockMap[szStr] === 'number')
+              const exactSizeStock = typeof sizeStockMap[szStr] === 'number'
                 ? sizeStockMap[szStr]
-                : (idx === 0 ? stockTotal : Math.max(0, Math.floor(stockTotal / Math.max(1, sizes.length))));
+                : hasExactMap
+                  ? 0
+                  : (idx === 0 ? stockTotal - evenShare * (sizes.length - 1) : evenShare);
 
               items.push({
                 id: `${pId}-${sz}`,
@@ -58,6 +75,7 @@ export default function InventoryPage() {
             });
           });
           setInventory(items);
+          setProductSizeStock(sizeStockByProduct);
         }
       }
     } catch {
@@ -68,7 +86,8 @@ export default function InventoryPage() {
   }, []);
 
   useEffect(() => {
-    loadInventory();
+    const timer = setTimeout(() => loadInventory(), 0);
+    return () => clearTimeout(timer);
   }, [loadInventory]);
 
   const getStatus = (stock: number) => {
@@ -98,39 +117,80 @@ export default function InventoryPage() {
   });
 
   const handleEditStart = (item: InventoryItem) => {
+    pendingEditRef.current = item.id;
     setEditingId(item.id);
     setEditValue(item.stock.toString());
   };
 
-  const handleEditSave = async () => {
-    if (editingId) {
-      const numValue = parseInt(editValue, 10);
-      if (!isNaN(numValue) && numValue >= 0) {
-        const targetItem = inventory.find(i => i.id === editingId);
-        setInventory(inventory.map(item => 
-          item.id === editingId ? { ...item, stock: numValue } : item
-        ));
+  const handleEditCancel = () => {
+    pendingEditRef.current = null;
+    setEditingId(null);
+  };
 
-        // Persist stock to API
-        if (targetItem?.productId) {
-          const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-          fetch(`/api/products/${targetItem.productId}`, {
-            method: 'PUT',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({ stock: numValue }),
-          }).catch(() => {});
-        }
+  const handleEditSave = async () => {
+    const editId = pendingEditRef.current;
+    // Already saved (Enter followed by blur) or cancelled
+    if (!editId || editId !== editingId) return;
+    pendingEditRef.current = null;
+    setEditingId(null);
+
+    const numValue = parseInt(editValue, 10);
+    const targetItem = inventory.find(i => i.id === editId);
+    if (isNaN(numValue) || numValue < 0 || !targetItem || targetItem.stock === numValue) return;
+
+    const previousStock = targetItem.stock;
+    const nextInventory = inventory.map(item =>
+      item.id === editId ? { ...item, stock: numValue } : item
+    );
+    setInventory(prev => prev.map(item => (item.id === editId ? { ...item, stock: numValue } : item)));
+    setSaveError(null);
+
+    if (!targetItem.productId) return;
+
+    // The product stores per-size stock in `sizeStock` and the total in `stock`: update both together
+    const meta = productSizeStock[targetItem.productId];
+    const payload: Record<string, unknown> = {};
+    if (meta && !meta.hasSizes) {
+      // Product without sizes: the single row is the total stock
+      payload.stock = numValue;
+    } else {
+      const sizeStock: Record<string, number> = { ...(meta?.sizeStock || {}) };
+      nextInventory
+        .filter(item => item.productId === targetItem.productId)
+        .forEach(item => {
+          sizeStock[item.size] = item.stock;
+        });
+      payload.sizeStock = JSON.stringify(sizeStock);
+      payload.stock = Object.values(sizeStock).reduce((sum, n) => sum + (Number(n) || 0), 0);
+    }
+
+    try {
+      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
+      const res = await fetch(`/api/products/${targetItem.productId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) throw new Error(json?.error || 'Failed to save stock');
+      if (typeof payload.sizeStock === 'string') {
+        setProductSizeStock(prev => ({
+          ...prev,
+          [targetItem.productId]: { hasSizes: true, sizeStock: JSON.parse(payload.sizeStock as string) },
+        }));
       }
-      setEditingId(null);
+    } catch (err) {
+      setInventory(prev => prev.map(item => (item.id === editId ? { ...item, stock: previousStock } : item)));
+      setSaveError(`${targetItem.product} (${targetItem.size}): ${err instanceof Error ? err.message : 'Failed to save stock'}`);
     }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') handleEditSave();
-    if (e.key === 'Escape') setEditingId(null);
+    if (e.key === 'Escape') handleEditCancel();
   };
 
   return (
@@ -147,6 +207,15 @@ export default function InventoryPage() {
           </button>
         </div>
       </div>
+
+      {saveError && (
+        <div className="mb-4 bg-red-500/10 border border-red-500/30 text-red-400 px-4 py-3 rounded-lg text-sm flex items-center justify-between gap-4">
+          <span>Stock not saved — {saveError}</span>
+          <button onClick={() => setSaveError(null)} className="text-red-300 hover:text-white">
+            <span className="material-symbols-outlined text-[18px]">close</span>
+          </button>
+        </div>
+      )}
 
       <div className="bg-[#141414] border border-[#262626] rounded-xl overflow-hidden">
         {/* Toolbar */}
