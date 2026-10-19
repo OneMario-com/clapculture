@@ -146,12 +146,12 @@ export default function Home() {
         <div className="absolute bottom-8 text-[10px] md:text-xs font-label-caps tracking-[0.3em] text-gray-500 uppercase text-center w-full">
           Design and developed by{' '}
           <a
-            href="https://vcard.stemlen.com/u/surendra"
+            href="https://onemario.com"
             target="_blank"
             rel="noopener noreferrer"
             className="text-electric-lime hover:underline font-bold"
           >
-            surendra.codes
+            One Mario
           </a>
         </div>
       </div>

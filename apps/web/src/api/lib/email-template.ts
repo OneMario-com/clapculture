@@ -222,7 +222,7 @@ export function buildClapCultureEmailTemplate(options: EmailTemplateOptions): st
                 <tr>
                   <td align="center" style="font-size: 11px; color: #525252; letter-spacing: 0.05em;">
                     &copy; ${new Date().getFullYear()} CLAPCULTURE. ALL RIGHTS RESERVED. <br/>
-                    DESIGN & DEVELOPED BY <a href="https://vcard.stemlen.com/u/surendra" target="_blank" style="color: #d2f000; font-weight: 700; text-decoration: none;">SURENDRA.CODES</a>
+                    DESIGN & DEVELOPED BY <a href="https://onemario.com" target="_blank" style="color: #d2f000; font-weight: 700; text-decoration: none;">ONE MARIO</a>
                   </td>
                 </tr>
               </table>

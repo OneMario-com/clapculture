@@ -255,7 +255,7 @@ export default function OrderClient({ orderId }: { orderId: string }) {
 
           {/* Developer Credit Footer */}
           <div className="text-center pt-6 border-t border-[#262626] text-[11px] font-label-caps text-[#737373]">
-            Design and developed by <a href="https://vcard.stemlen.com/u/surendra" target="_blank" rel="noopener noreferrer" className="text-electric-lime font-bold hover:underline">surendra.codes</a>
+            Design and developed by <a href="https://onemario.com" target="_blank" rel="noopener noreferrer" className="text-electric-lime font-bold hover:underline">One Mario</a>
           </div>
         </div>
       </div>
