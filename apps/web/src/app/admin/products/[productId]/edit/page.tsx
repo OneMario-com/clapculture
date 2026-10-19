@@ -1,7 +1,6 @@
 import React from 'react';
 import EditProductClient from './EditProductClient';
 
-export const runtime = 'edge';
 
 export default async function EditProductPage({ params }: { params: Promise<{ productId: string }> }) {
   const { productId } = await params;

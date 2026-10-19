@@ -1,7 +1,6 @@
 import React from 'react';
 import OrderClient from './OrderClient';
 
-export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
 export default async function OrderDetailsPage({ params }: { params: Promise<{ orderId: string }> }) {

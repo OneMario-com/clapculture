@@ -8,10 +8,10 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=@clapculture/web",
-    "build": "cd apps/web && npx @cloudflare/next-on-pages && node ../../scripts/apply-routes.js && (echo '_worker.js' > .vercel/output/static/.assetsignore || true)",
-    "pages:build": "cd apps/web && npx @cloudflare/next-on-pages && node ../../scripts/apply-routes.js && (echo '_worker.js' > .vercel/output/static/.assetsignore || true)",
-    "deploy": "npm run build && cd apps/web && wrangler pages deploy .vercel/output/static --project-name=clapculture",
-    "deploy:pages": "npm run build && cd apps/web && wrangler pages deploy .vercel/output/static --project-name=clapculture",
+    "build": "npm run build:worker --workspace=@clapculture/web",
+    "deploy": "npm run deploy:worker --workspace=@clapculture/web",
+    "upload": "npm run upload:worker --workspace=@clapculture/web",
+    "preview": "npm run preview --workspace=@clapculture/web",
     "db:setup": "node scripts/setup-db.js && node scripts/seed-admin.js",
     "db:seed": "node scripts/seed-admin.js",
     "email:verify": "node scripts/verify-smtp.js",
@@ -21,8 +21,7 @@
     "otp:send": "node scripts/send-otp.js"
   },
   "devDependencies": {
-    "concurrently": "^10.0.4",
-    "wrangler": "^4.122.0"
+    "concurrently": "^10.0.4"
   },
   "dependencies": {
     "nodemailer": "^9.0.5"

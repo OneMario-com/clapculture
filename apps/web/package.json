@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build --webpack && node -e \"require('fs').rmSync('.next/cache', {recursive: true, force: true}); require('fs').rmSync('.next/dev', {recursive: true, force: true})\"",
-    "pages:build": "npx @cloudflare/next-on-pages",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
+    "build:worker": "opennextjs-cloudflare build",
+    "deploy:worker": "opennextjs-cloudflare deploy",
+    "upload:worker": "opennextjs-cloudflare upload",
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "start": "next start",
     "lint": "eslint",
     "db:setup": "node ../../scripts/setup-db.js && node ../../scripts/seed-admin.js"
@@ -13,7 +16,7 @@
   "dependencies": {
     "@clapculture/shared": "*",
     "hono": "^4.7.2",
-    "next": "16.3.0",
+    "next": "16.4.2",
     "node-appwrite": "^14.1.0",
     "nodemailer": "^9.0.5",
     "react": "19.2.8",
@@ -21,15 +24,16 @@
     "sharp": "^0.33.5"
   },
   "devDependencies": {
-    "@cloudflare/next-on-pages": "^1.13.16",
+    "@opennextjs/cloudflare": "^1.20.12",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/nodemailer": "^8.0.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.3.0",
+    "eslint-config-next": "16.4.2",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wrangler": "^4.151.2"
   }
 }

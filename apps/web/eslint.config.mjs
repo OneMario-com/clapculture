@@ -13,8 +13,8 @@ const eslintConfig = defineConfig([
   // Global ignores
   globalIgnores([
     ".next/**",
-    ".vercel/**",
-    ".cloudflare/**",
+    ".open-next/**",
+    ".wrangler/**",
     "out/**",
     "build/**",
     "dist/**",

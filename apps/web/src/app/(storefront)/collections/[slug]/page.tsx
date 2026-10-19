@@ -3,7 +3,6 @@ import CollectionClient from './CollectionClient';
 import { getServerCollectionBySlug } from '@/lib/server-data';
 
 export const dynamic = 'force-dynamic';
-export const runtime = 'edge';
 import { Metadata } from 'next';
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
