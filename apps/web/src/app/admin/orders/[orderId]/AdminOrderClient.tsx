@@ -1,7 +1,7 @@
 /* eslint-disable @next/next/no-img-element */
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { formatCurrency, resolveImageUrl } from '@/lib/utils';
 
@@ -25,6 +25,8 @@ interface OrderCustomer {
   pincode?: string;
   screenshotUrl?: string;
   paymentProof?: string;
+  discountCode?: string;
+  discountAmount?: number;
 }
 
 interface OrderDoc {
@@ -48,6 +50,7 @@ interface OrderDoc {
 export default function AdminOrderClient({ orderId }: { orderId: string }) {
   const [order, setOrder] = useState<OrderDoc | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
 
   const [paymentStatus, setPaymentStatus] = useState('SUBMITTED');
@@ -55,48 +58,96 @@ export default function AdminOrderClient({ orderId }: { orderId: string }) {
   const [trackingNumber, setTrackingNumber] = useState('');
   const [toast, setToast] = useState<{ show: boolean; msg: string; isError?: boolean }>({ show: false, msg: '' });
 
+  const loadRequestRef = useRef(0);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
   const showToast = (msg: string, isError = false) => {
     setToast({ show: true, msg, isError });
-    setTimeout(() => setToast({ show: false, msg: '' }), 3500);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast({ show: false, msg: '' }), 3500);
+  };
+
+  const applyOrderDoc = (doc: OrderDoc) => {
+    setOrder(doc);
+    setPaymentStatus(doc.paymentStatus || 'SUBMITTED');
+    setOrderStatus(doc.orderStatus || 'PLACED');
+    setTrackingNumber(doc.trackingNumber || '');
   };
 
   const loadOrder = async () => {
+    const requestId = ++loadRequestRef.current;
+    setLoading(true);
+    setLoadError(null);
     try {
-      setLoading(true);
       const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch(`/api/orders/${orderId}`, {
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
+      const json = await res.json().catch(() => null);
+      if (requestId !== loadRequestRef.current) return;
 
-      if (res.ok) {
-        const json = await res.json();
-        if (json.success && json.data) {
-          const doc: OrderDoc = json.data;
-          setOrder(doc);
-          setPaymentStatus(doc.paymentStatus || 'SUBMITTED');
-          setOrderStatus(doc.orderStatus || 'PLACED');
-          setTrackingNumber(doc.trackingNumber || '');
-        }
+      if (res.ok && json?.success && json.data) {
+        applyOrderDoc(json.data as OrderDoc);
+      } else {
+        setOrder(null);
+        setLoadError(
+          json?.error || (res.status === 404 ? 'Order not found.' : `Failed to load order (HTTP ${res.status}).`)
+        );
       }
     } catch (err) {
+      if (requestId !== loadRequestRef.current) return;
       console.error('Failed to load order:', err);
+      setOrder(null);
+      setLoadError('Network error while loading this order.');
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    setTimeout(() => loadOrder(), 0);
+    // Each loadOrder() call bumps the request counter, so responses for an older request are ignored
+    const timer = setTimeout(() => loadOrder(), 0);
+    return () => clearTimeout(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId]);
 
+  // PUT a partial status update for the loaded order and sync local state from the returned document
+  const putOrderStatus = async (updates: Record<string, unknown>) => {
+    if (!order) return { ok: false as const, error: 'Order not loaded' };
+    const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
+    const res = await fetch(`/api/orders/${encodeURIComponent(order.$id)}/status`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(updates),
+    });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.success) {
+      if (json.data && typeof json.data === 'object') {
+        applyOrderDoc({ ...order, ...(json.data as OrderDoc) });
+      } else {
+        applyOrderDoc({ ...order, ...(updates as Partial<OrderDoc>) });
+      }
+      return { ok: true as const };
+    }
+    return { ok: false as const, error: (json?.error as string) || `HTTP ${res.status}` };
+  };
+
   const handleToggleArchive = async () => {
-    if (!order) return;
+    if (!order || isUpdating) return;
     setIsUpdating(true);
     const targetState = !order.isArchived;
     try {
       const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch(`/api/orders/${order.$id || orderId}/archive`, {
+      const res = await fetch(`/api/orders/${encodeURIComponent(order.$id)}/archive`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -105,12 +156,12 @@ export default function AdminOrderClient({ orderId }: { orderId: string }) {
         body: JSON.stringify({ isArchived: targetState }),
       });
 
-      const json = await res.json();
-      if (res.ok && json.success) {
+      const json = await res.json().catch(() => null);
+      if (res.ok && json?.success) {
         setOrder((prev) => (prev ? { ...prev, isArchived: targetState } : null));
         showToast(targetState ? '📦 Order archived successfully!' : '📂 Order restored to active list!');
       } else {
-        showToast(json.error || 'Failed to update archive status', true);
+        showToast(json?.error || 'Failed to update archive status', true);
       }
     } catch {
       showToast('Network error while toggling archive status', true);
@@ -120,35 +171,29 @@ export default function AdminOrderClient({ orderId }: { orderId: string }) {
   };
 
   const handleVerifyPayment = async (status: 'VERIFIED' | 'REJECTED') => {
+    if (!order || isUpdating) return;
     setIsUpdating(true);
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const newOrderStatus = status === 'VERIFIED' ? 'CONFIRMED' : orderStatus;
-      
-      const res = await fetch(`/api/orders/${orderId}/status`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          paymentStatus: status,
-          orderStatus: newOrderStatus,
-        }),
-      });
+      const updates: Record<string, unknown> = {};
+      if (order.paymentStatus !== status) updates.paymentStatus = status;
+      // Verifying confirms a freshly placed order; never roll back an order that is further along
+      if (status === 'VERIFIED' && (order.orderStatus || 'PLACED') === 'PLACED') {
+        updates.orderStatus = 'CONFIRMED';
+      }
+      if (Object.keys(updates).length === 0) {
+        showToast(status === 'VERIFIED' ? 'Payment is already verified.' : 'Payment is already rejected.');
+        return;
+      }
 
-      const json = await res.json();
-      if (res.ok && json.success) {
-        setPaymentStatus(status);
-        if (status === 'VERIFIED') setOrderStatus('CONFIRMED');
+      const result = await putOrderStatus(updates);
+      if (result.ok) {
         showToast(
           status === 'VERIFIED'
             ? '✨ Payment verified & order confirmed! Customer notified via email.'
             : '⚠️ Payment rejected.'
         );
-        loadOrder();
       } else {
-        showToast(json.error || 'Failed to update payment status', true);
+        showToast(result.error || 'Failed to update payment status', true);
       }
     } catch {
       showToast('Network error while updating status', true);
@@ -158,28 +203,26 @@ export default function AdminOrderClient({ orderId }: { orderId: string }) {
   };
 
   const handleUpdateStatus = async () => {
+    if (!order || isUpdating) return;
     setIsUpdating(true);
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch(`/api/orders/${orderId}/status`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          orderStatus,
-          paymentStatus,
-          trackingNumber: trackingNumber.trim() || undefined,
-        }),
-      });
+      // Only send fields that differ from the loaded order
+      const updates: Record<string, unknown> = {};
+      if (orderStatus !== (order.orderStatus || 'PLACED')) updates.orderStatus = orderStatus;
+      if (paymentStatus !== (order.paymentStatus || 'SUBMITTED')) updates.paymentStatus = paymentStatus;
+      const trimmedTracking = trackingNumber.trim();
+      if (trimmedTracking !== (order.trackingNumber || '')) updates.trackingNumber = trimmedTracking;
 
-      const json = await res.json();
-      if (res.ok && json.success) {
+      if (Object.keys(updates).length === 0) {
+        showToast('No changes to save.');
+        return;
+      }
+
+      const result = await putOrderStatus(updates);
+      if (result.ok) {
         showToast(`✨ Fulfillment status updated to ${orderStatus}!`);
-        loadOrder();
       } else {
-        showToast(json.error || 'Failed to update order status', true);
+        showToast(result.error || 'Failed to update order status', true);
       }
     } catch {
       showToast('Network error while updating status', true);
@@ -345,6 +388,34 @@ _Team CLAPCULTURE_ ⚡`;
     );
   }
 
+  // Never render the editable form without a loaded order (saving defaults would roll back real statuses)
+  if (!order) {
+    return (
+      <div className="bg-[#0a0a0a] min-h-screen p-6 text-white flex flex-col items-center justify-center text-center">
+        <span className="material-symbols-outlined text-5xl text-red-400 mb-3">error</span>
+        <p className="font-mono text-sm font-bold text-white mb-1">Could not load order #{cleanId}</p>
+        <p className="font-mono text-xs text-gray-400 mb-6">{loadError || 'Order not found.'}</p>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => loadOrder()}
+            className="bg-electric-lime hover:bg-white text-black font-bold px-4 py-2 rounded-lg text-xs transition-colors uppercase font-mono cursor-pointer flex items-center gap-1.5"
+          >
+            <span className="material-symbols-outlined text-base">refresh</span>
+            Retry
+          </button>
+          <Link
+            href="/admin/orders"
+            className="bg-[#262626] hover:bg-[#333] text-gray-300 px-4 py-2 rounded-lg text-xs font-mono border border-[#333] transition-colors flex items-center gap-1.5"
+          >
+            <span className="material-symbols-outlined text-base">arrow_back</span>
+            Back to Orders
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-[#0a0a0a] min-h-screen p-6 text-white">
       {/* Toast Notification */}
@@ -369,7 +440,7 @@ _Team CLAPCULTURE_ ⚡`;
           <div className="flex items-center gap-2">
             <span className="text-xs text-[#737373]">Live Status:</span>
             <span className="bg-electric-lime/10 text-electric-lime border border-electric-lime/20 px-3 py-1 rounded-full text-xs font-bold font-mono">
-              {orderStatus}
+              {order?.orderStatus || orderStatus}
             </span>
           </div>
         </div>
@@ -591,10 +662,15 @@ _Team CLAPCULTURE_ ⚡`;
                   <p className="text-2xl font-bold text-white mt-0.5">
                     {formatCurrency(order?.total || 0)}
                   </p>
+                  {Number(customer.discountAmount) > 0 && (
+                    <p className="text-xs text-electric-lime mt-1">
+                      Includes discount {customer.discountCode}: -{formatCurrency(Number(customer.discountAmount))}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <span className="text-xs text-[#737373] block">Payment Channel:</span>
-                  <p className="text-xs text-gray-300 mt-0.5">Direct UPI (paytm.s1qzmi4@pty)</p>
+                  <p className="text-xs text-gray-300 mt-0.5">Direct UPI (8639654299@ybl)</p>
                 </div>
               </div>
             </div>

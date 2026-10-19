@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { compressImageFile } from '@/lib/image-compression';
+import { adminFetch } from '@/lib/admin-fetch';
+import { resolveImageUrl } from '@/lib/utils';
 
 type MediaItem = {
   id: string;
@@ -41,10 +43,12 @@ export default function MediaLibrary() {
     let cancelled = false;
     const load = async () => {
       try {
-        const res = await fetch('/api/media');
-        const json = await res.json();
-        if (json.success && json.data && !cancelled) {
+        const res = await adminFetch('/api/media');
+        const json = await res.json().catch(() => null);
+        if (json?.success && json.data && !cancelled) {
           setMedia(json.data);
+        } else if (!cancelled) {
+          showToast(json?.error || 'Failed to load media');
         }
       } catch (err) {
         console.error('Failed to fetch media', err);
@@ -71,14 +75,14 @@ export default function MediaLibrary() {
     
     try {
       showToast('Deleting...');
-      const res = await fetch(`/api/media/${id}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (json.success) {
+      const res = await adminFetch(`/api/media/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const json = await res.json().catch(() => null);
+      if (json?.success) {
         setMedia(media.filter(m => m.id !== id));
         showToast('File deleted successfully');
         if (previewItem?.id === id) setPreviewItem(null);
       } else {
-        showToast(json.error || 'Failed to delete file');
+        showToast(json?.error || 'Failed to delete file');
       }
     } catch (err) {
       console.error(err);
@@ -109,16 +113,12 @@ export default function MediaLibrary() {
     try {
       setUploading(true);
       showToast('Optimizing & uploading...');
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
       const optimizedFile = await compressImageFile(file, { maxWidth: 1800, maxHeight: 1800, quality: 0.84 });
       const formData = new FormData();
       formData.append('file', optimizedFile);
       
-      const res = await fetch('/api/media/upload', {
+      const res = await adminFetch('/api/media/upload', {
         method: 'POST',
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
         body: formData,
       });
       const json = await res.json();
@@ -158,7 +158,7 @@ export default function MediaLibrary() {
             </div>
             <div className="bg-[#0a0a0a] rounded-lg flex items-center justify-center p-4">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={previewItem.url} alt={previewItem.name} className="max-h-[60vh] object-contain" />
+              <img src={resolveImageUrl(previewItem.url)} alt={previewItem.name} className="max-h-[60vh] object-contain" />
             </div>
             <div className="flex justify-between items-center mt-4">
               <div className="text-sm text-[#737373]">
@@ -259,7 +259,7 @@ export default function MediaLibrary() {
             <div key={item.id} className="group relative bg-[#141414] border border-[#262626] rounded-lg overflow-hidden flex flex-col">
               <div className="aspect-square bg-[#1a1a1a] flex items-center justify-center relative overflow-hidden">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={item.url} alt={item.name} className="object-cover w-full h-full" />
+                <img src={resolveImageUrl(item.url)} alt={item.name} className="object-cover w-full h-full" />
                 
                 {/* Hover Actions */}
                 <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
@@ -302,7 +302,7 @@ export default function MediaLibrary() {
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded bg-[#262626] overflow-hidden shrink-0">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={item.url} alt="" className="w-full h-full object-cover" />
+                        <img src={resolveImageUrl(item.url)} alt="" className="w-full h-full object-cover" />
                       </div>
                       <span className="text-white font-medium truncate max-w-50 md:max-w-md">{item.name}</span>
                     </div>

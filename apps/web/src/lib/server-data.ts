@@ -1,42 +1,33 @@
 /**
  * Server-side Direct Database Data Fetchers
- * Used by Server Components (e.g. product/[slug], collections/[slug], category/[slug])
- * directly querying Appwrite with server memory cache to eliminate self-HTTP loops during build.
+ * Used by Server Components (e.g. product/[slug], collections/[slug], category/[slug]).
+ *
+ * Everything is resolved from the shared catalog cache (memory + Redis, see
+ * api/lib/catalog.ts), so rendering a page — including generateMetadata and the
+ * page itself, or an unknown slug — costs no extra Appwrite reads, and admin
+ * edits invalidate these pages together with the API.
  */
-import { Query } from 'node-appwrite';
-import { getAppwriteClient } from '@/api/lib/appwrite';
-import { getCached, setCached } from '@/api/lib/cache';
 import { Product, Collection, Category } from '@clapculture/shared';
-
-const DB_ID = process.env.APPWRITE_DATABASE_ID || 'clapculture_db';
+import {
+  getAllProducts,
+  getAllCollections,
+  getAllCategories,
+  isProductVisible as isCatalogProductVisible,
+  CatalogDoc,
+} from '@/api/lib/catalog';
 
 export function isProductVisible(product: Product | Record<string, unknown> | null | undefined): boolean {
-  if (!product) return false;
-  const p = product as Record<string, unknown>;
-  if (p.isActive === false) return false;
-  if (Array.isArray(p.badges)) {
-    if (p.badges.includes('HIDDEN') || p.badges.includes('DISABLED')) return false;
-  }
-  return true;
+  return isCatalogProductVisible(product as Record<string, unknown> | null | undefined);
+}
+
+function withId<T>(doc: CatalogDoc): T {
+  return { ...doc, id: doc.$id || doc.id } as unknown as T;
 }
 
 export async function getServerProducts(limit = 100): Promise<Product[]> {
-  const cacheKey = `server_products_${limit}`;
-  const cached = getCached<Product[]>(cacheKey);
-  if (cached) return cached;
-
   try {
-    const { databases } = getAppwriteClient();
-    const res = await databases.listDocuments(DB_ID, 'products', [Query.limit(limit)]);
-    const allProducts = res.documents.map((d) => ({
-      ...d,
-      id: d.$id || d.id,
-    })) as unknown as Product[];
-    
-    // Storefront queries only return visible/active products
-    const products = allProducts.filter(isProductVisible);
-    setCached(cacheKey, products, 300); // 5 minutes cache
-    return products;
+    const all = await getAllProducts();
+    return all.filter(isCatalogProductVisible).slice(0, limit).map((d) => withId<Product>(d));
   } catch (e) {
     console.log('getServerProducts error:', (e as Error).message);
     return [];
@@ -44,60 +35,11 @@ export async function getServerProducts(limit = 100): Promise<Product[]> {
 }
 
 export async function getServerProductBySlug(slugOrId: string): Promise<Product | null> {
-  const cacheKey = `server_product_${slugOrId}`;
-  const cached = getCached<Product | null>(cacheKey);
-  if (cached !== null && cached !== undefined) return cached;
-
   try {
-    // 1. Try resolving from cached products array first (0 Appwrite database calls)
-    const allProducts = await getServerProducts(100);
-    const existing = allProducts.find(
-      (p) => p.slug === slugOrId || p.id === slugOrId || (p as unknown as Record<string, unknown>).$id === slugOrId
-    );
-    if (existing) {
-      if (!isProductVisible(existing)) return null;
-      setCached(cacheKey, existing, 300);
-      return existing;
-    }
-
-    // 2. Direct document ID lookup
-    const { databases } = getAppwriteClient();
-    try {
-      const doc = await databases.getDocument(DB_ID, 'products', slugOrId);
-      if (doc) {
-        const product = {
-          ...doc,
-          id: doc.$id || doc.id,
-        } as unknown as Product;
-        
-        if (!isProductVisible(product)) {
-          return null;
-        }
-        setCached(cacheKey, product, 300);
-        return product;
-      }
-    } catch {
-      // Continue to slug lookup
-    }
-
-    // 3. Direct query by slug
-    const res = await databases.listDocuments(DB_ID, 'products', [
-      Query.equal('slug', slugOrId),
-      Query.limit(1),
-    ]);
-    if (res.documents.length === 0) return null;
-    const doc = res.documents[0];
-    const product = {
-      ...doc,
-      id: doc.$id || doc.id,
-    } as unknown as Product;
-    
-    if (!isProductVisible(product)) {
-      return null;
-    }
-    
-    setCached(cacheKey, product, 300);
-    return product;
+    const all = await getAllProducts();
+    const doc = all.find((p) => p.slug === slugOrId || p.$id === slugOrId || p.id === slugOrId);
+    if (!doc || !isCatalogProductVisible(doc)) return null;
+    return withId<Product>(doc);
   } catch (e) {
     console.log('getServerProductBySlug error:', (e as Error).message);
     return null;
@@ -105,19 +47,8 @@ export async function getServerProductBySlug(slugOrId: string): Promise<Product 
 }
 
 export async function getServerCollections(): Promise<Collection[]> {
-  const cacheKey = 'server_collections_all';
-  const cached = getCached<Collection[]>(cacheKey);
-  if (cached) return cached;
-
   try {
-    const { databases } = getAppwriteClient();
-    const res = await databases.listDocuments(DB_ID, 'collections', [Query.limit(100)]);
-    const collections = res.documents.map((d) => ({
-      ...d,
-      id: d.$id || d.id,
-    })) as unknown as Collection[];
-    setCached(cacheKey, collections, 120);
-    return collections;
+    return (await getAllCollections()).map((d) => withId<Collection>(d));
   } catch (e) {
     console.log('getServerCollections error:', (e as Error).message);
     return [];
@@ -125,24 +56,9 @@ export async function getServerCollections(): Promise<Collection[]> {
 }
 
 export async function getServerCollectionBySlug(slug: string): Promise<Collection | null> {
-  const cacheKey = `server_collection_${slug}`;
-  const cached = getCached<Collection | null>(cacheKey);
-  if (cached !== null && cached !== undefined) return cached;
-
   try {
-    const { databases } = getAppwriteClient();
-    const res = await databases.listDocuments(DB_ID, 'collections', [
-      Query.equal('slug', slug),
-      Query.limit(1),
-    ]);
-    if (res.documents.length === 0) return null;
-    const doc = res.documents[0];
-    const collection = {
-      ...doc,
-      id: doc.$id || doc.id,
-    } as unknown as Collection;
-    setCached(cacheKey, collection, 120);
-    return collection;
+    const doc = (await getAllCollections()).find((c) => c.slug === slug);
+    return doc ? withId<Collection>(doc) : null;
   } catch (e) {
     console.log('getServerCollectionBySlug error:', (e as Error).message);
     return null;
@@ -150,19 +66,8 @@ export async function getServerCollectionBySlug(slug: string): Promise<Collectio
 }
 
 export async function getServerCategories(): Promise<Category[]> {
-  const cacheKey = 'server_categories_all';
-  const cached = getCached<Category[]>(cacheKey);
-  if (cached) return cached;
-
   try {
-    const { databases } = getAppwriteClient();
-    const res = await databases.listDocuments(DB_ID, 'categories', [Query.limit(100)]);
-    const categories = res.documents.map((d) => ({
-      ...d,
-      id: d.$id || d.id,
-    })) as unknown as Category[];
-    setCached(cacheKey, categories, 120);
-    return categories;
+    return (await getAllCategories()).map((d) => withId<Category>(d));
   } catch (e) {
     console.log('getServerCategories error:', (e as Error).message);
     return [];

@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin-fetch';
 
 type Tab = 'store' | 'payment' | 'shipping' | 'notifications' | 'social';
 
@@ -43,7 +44,7 @@ export default function SettingsPage() {
   });
 
   useEffect(() => {
-    fetch('/api/settings')
+    adminFetch('/api/settings')
       .then(res => res.json())
       .then(json => {
         if (json.success && json.data) {
@@ -69,9 +70,9 @@ export default function SettingsPage() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setLoading(true);
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
       const payload = {
         storeName: storeData.name,
         currency: 'INR',
@@ -81,12 +82,9 @@ export default function SettingsPage() {
         qrCodeUrl: paymentData.qrCodeUrl,
       };
 
-      const res = await fetch('/api/settings', {
+      const res = await adminFetch('/api/settings', {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
@@ -198,8 +196,8 @@ export default function SettingsPage() {
                   </div>
                   
                   <div className="pt-4 border-t border-[#262626] flex justify-end">
-                    <button type="submit" className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400]">
-                      Save Changes
+                    <button type="submit" disabled={loading} className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400] disabled:opacity-50 disabled:cursor-not-allowed">
+                      {loading ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </form>
@@ -244,8 +242,8 @@ export default function SettingsPage() {
                   </div>
                   
                   <div className="pt-4 border-t border-[#262626] flex justify-end">
-                    <button type="submit" className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400]">
-                      Save Changes
+                    <button type="submit" disabled={loading} className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400] disabled:opacity-50 disabled:cursor-not-allowed">
+                      {loading ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </form>
@@ -282,8 +280,8 @@ export default function SettingsPage() {
                   </div>
                   
                   <div className="pt-4 border-t border-[#262626] flex justify-end">
-                    <button type="submit" className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400]">
-                      Save Changes
+                    <button type="submit" disabled={loading} className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400] disabled:opacity-50 disabled:cursor-not-allowed">
+                      {loading ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </form>
@@ -344,8 +342,8 @@ export default function SettingsPage() {
                   </div>
                   
                   <div className="pt-4 border-t border-[#262626] flex justify-end">
-                    <button type="submit" className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400]">
-                      Save Changes
+                    <button type="submit" disabled={loading} className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400] disabled:opacity-50 disabled:cursor-not-allowed">
+                      {loading ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </form>
@@ -399,8 +397,8 @@ export default function SettingsPage() {
                   </div>
                   
                   <div className="pt-4 border-t border-[#262626] flex justify-end">
-                    <button type="submit" className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400]">
-                      Save Changes
+                    <button type="submit" disabled={loading} className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400] disabled:opacity-50 disabled:cursor-not-allowed">
+                      {loading ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </form>

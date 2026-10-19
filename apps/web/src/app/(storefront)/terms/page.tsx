@@ -88,9 +88,9 @@ export default function TermsPage() {
             <div className="bg-black/60 border border-red-500/30 rounded-lg p-4 mb-4">
               <span className="text-xs text-gray-400 font-mono uppercase block mb-1">Official CLAPCULTURE UPI ID:</span>
               <span className="text-lg md:text-xl font-mono font-bold text-electric-lime select-all">
-                paytm.s1qzmi4@pty
+                8639654299@ybl
               </span>
-              <span className="text-xs text-gray-400 block mt-1">Designated merchant collection via Paytm for Business</span>
+              <span className="text-xs text-gray-400 block mt-1">Designated merchant collection via UPI</span>
             </div>
             <p className="text-xs md:text-sm text-gray-300 mb-3">
               CLAPCULTURE is responsible only for payment instructions officially provided through our authorized checkout portal. Do NOT transfer money to any other personal UPI handle, phone number, or unverified QR code.

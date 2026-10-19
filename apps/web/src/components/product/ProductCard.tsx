@@ -17,7 +17,7 @@ export function ProductCard({ product }: ProductCardProps) {
   const [isSizeModalOpen, setIsSizeModalOpen] = useState(false);
   const [selectedSize, setSelectedSize] = useState<Size>(product.sizes[0] || 'M');
 
-  const primaryImage = resolveImageUrl(product.images[0]) || '6a7fa922002c9b023447';
+  const primaryImage = resolveImageUrl(product.images[0] || '6a7fa922002c9b023447');
   const secondaryImage = resolveImageUrl(product.images[1]) || primaryImage;
   const isOutOfStock = product.stock <= 0;
 

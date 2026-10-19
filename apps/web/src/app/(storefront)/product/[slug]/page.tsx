@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import ProductClient from './ProductClient';
 import { getServerProductBySlug, getServerProducts } from '@/lib/server-data';
 import { Metadata } from 'next';
+import { resolveImageUrl } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'edge';
@@ -12,7 +13,8 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   const product = await getServerProductBySlug(slug);
   if (!product) return { title: 'Product Not Found | CLAPCULTURE' };
   
-  const ogImage = product.images?.[0] || '/og-image.jpg';
+  // Image URLs go through the site's media proxy (relative URLs resolve against metadataBase).
+  const ogImage = product.images?.[0] ? resolveImageUrl(product.images[0]) : '/herobg1-desktop.png';
   
   return {
     title: `${product.name} | CLAPCULTURE`,
@@ -60,7 +62,10 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
     '@context': 'https://schema.org',
     '@type': 'Product',
     name: product.name,
-    image: product.images,
+    image: (product.images || []).map((img) => {
+      const url = resolveImageUrl(img);
+      return url.startsWith('/') ? `https://clapculture.com${url}` : url;
+    }),
     description: product.description,
     offers: {
       '@type': 'Offer',

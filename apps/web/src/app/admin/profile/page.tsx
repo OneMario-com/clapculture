@@ -1,170 +1,124 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { adminFetch } from '@/lib/admin-fetch';
+
+// JWT payload returned by GET /api/admin/me (iat / exp are unix seconds)
+interface AdminSession {
+  id?: string;
+  username?: string;
+  role?: string;
+  iat?: number;
+  exp?: number;
+}
+
+const formatTimestamp = (seconds?: number) =>
+  seconds
+    ? new Date(seconds * 1000).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })
+    : '—';
 
 export default function ProfilePage() {
-  const [toast, setToast] = useState<string | null>(null);
+  const [admin, setAdmin] = useState<AdminSession | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const [profileData, setProfileData] = useState({
-    name: 'Admin User',
-    email: 'admin@clapculture.com',
-    phone: '+91 9876543210',
-    avatar: ''
-  });
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await adminFetch('/api/admin/me');
+        const json = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (res.ok && json?.success && json.data) {
+          setAdmin(json.data as AdminSession);
+        } else {
+          setError(json?.error || 'Failed to load the admin session');
+        }
+      } catch {
+        if (!cancelled) setError('Error connecting to server');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, []);
 
-  const [passwords, setPasswords] = useState({
-    current: '',
-    new: '',
-    confirm: ''
-  });
-
-  const showToast = (message: string) => {
-    setToast(message);
-    setTimeout(() => setToast(null), 3000);
-  };
-
-  const handleUpdateProfile = (e: React.FormEvent) => {
-    e.preventDefault();
-    showToast('Profile updated successfully');
-  };
-
-  const handleChangePassword = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (passwords.new !== passwords.confirm) {
-      showToast('New passwords do not match');
-      return;
-    }
-    showToast('Password changed successfully');
-    setPasswords({ current: '', new: '', confirm: '' });
-  };
-
-  const getInitial = () => profileData.name.charAt(0).toUpperCase();
+  const email = admin?.username || '';
+  const initial = (email.charAt(0) || 'A').toUpperCase();
+  const role = admin?.role ? admin.role.replace(/[_-]+/g, ' ') : 'admin';
 
   return (
     <div className="bg-[#0a0a0a] min-h-screen text-white p-6">
       <div className="max-w-4xl mx-auto">
         <h1 className="text-2xl font-bold text-white mb-8">Admin Profile</h1>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Profile Card */}
-          <div className="lg:col-span-1 space-y-6">
-            <div className="bg-[#141414] border border-[#262626] rounded-xl p-6 flex flex-col items-center text-center">
-              <div className="w-24 h-24 bg-[#1a1a1a] border border-[#262626] rounded-full flex items-center justify-center mb-4 text-3xl font-bold text-[#d2f000] relative group cursor-pointer overflow-hidden">
-                {profileData.avatar ? (
-                  <img src={profileData.avatar} alt="Profile" className="w-full h-full object-cover" />
-                ) : (
-                  getInitial()
-                )}
-                <div className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                  <span className="material-symbols-outlined text-white">photo_camera</span>
+        {loading ? (
+          <div className="bg-[#141414] border border-[#262626] rounded-xl p-12 text-center text-[#737373]">
+            <div className="w-6 h-6 border-2 border-[#d2f000] border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+            <p>Loading admin session...</p>
+          </div>
+        ) : error ? (
+          <div className="bg-red-500/10 border border-red-500/30 text-red-400 rounded-xl p-6 flex items-center gap-3">
+            <span className="material-symbols-outlined">error</span>
+            <span className="text-sm">{error}</span>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Profile Card */}
+            <div className="lg:col-span-1 space-y-6">
+              <div className="bg-[#141414] border border-[#262626] rounded-xl p-6 flex flex-col items-center text-center">
+                <div className="w-24 h-24 bg-[#1a1a1a] border border-[#262626] rounded-full flex items-center justify-center mb-4 text-3xl font-bold text-[#d2f000]">
+                  {initial}
+                </div>
+                <h2 className="text-lg font-bold text-white break-all">{email || 'Admin'}</h2>
+                <span className="bg-[#d2f000]/10 text-[#d2f000] border border-[#d2f000]/20 px-3 py-1 rounded-full text-xs font-medium mt-3 capitalize">
+                  {role}
+                </span>
+              </div>
+            </div>
+
+            <div className="lg:col-span-2 space-y-6">
+              {/* Session */}
+              <div className="bg-[#141414] border border-[#262626] rounded-xl p-6">
+                <h2 className="text-lg font-bold text-white mb-6">Signed-in Admin</h2>
+                <dl className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <dt className="text-[#a3a3a3] mb-1">Email</dt>
+                    <dd className="text-white font-mono break-all">{email || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-[#a3a3a3] mb-1">Role</dt>
+                    <dd className="text-white capitalize">{role}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-[#a3a3a3] mb-1">Signed in</dt>
+                    <dd className="text-white">{formatTimestamp(admin?.iat)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-[#a3a3a3] mb-1">Session expires</dt>
+                    <dd className="text-white">{formatTimestamp(admin?.exp)}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              {/* Credentials */}
+              <div className="bg-[#141414] border border-[#262626] rounded-xl p-6">
+                <h2 className="text-lg font-bold text-white mb-3">Email &amp; Password</h2>
+                <div className="flex items-start gap-3 text-sm text-[#a3a3a3]">
+                  <span className="material-symbols-outlined text-[#d2f000] text-[20px]">info</span>
+                  <p>
+                    The admin email and password are set with the{' '}
+                    <code className="font-mono text-white bg-[#1a1a1a] border border-[#262626] rounded px-1">ADMIN_EMAIL</code> and{' '}
+                    <code className="font-mono text-white bg-[#1a1a1a] border border-[#262626] rounded px-1">ADMIN_PASSWORD</code>{' '}
+                    environment variables on the server. To change them, update those variables and restart or redeploy
+                    the server; they can&apos;t be edited from this page.
+                  </p>
                 </div>
               </div>
-              <h2 className="text-xl font-bold text-white">{profileData.name}</h2>
-              <p className="text-[#a3a3a3] text-sm mb-2">{profileData.email}</p>
-              <span className="bg-[#d2f000]/10 text-[#d2f000] border border-[#d2f000]/20 px-3 py-1 rounded-full text-xs font-medium mt-2">
-                Super Admin
-              </span>
             </div>
           </div>
-
-          {/* Forms */}
-          <div className="lg:col-span-2 space-y-6">
-            
-            {/* Edit Profile */}
-            <div className="bg-[#141414] border border-[#262626] rounded-xl p-6">
-              <h2 className="text-lg font-bold text-white mb-6">Edit Profile</h2>
-              <form onSubmit={handleUpdateProfile} className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-[#a3a3a3] mb-2">Full Name</label>
-                    <input 
-                      type="text" 
-                      required
-                      value={profileData.name}
-                      onChange={(e) => setProfileData({...profileData, name: e.target.value})}
-                      className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-white focus:border-[#d2f000] outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-[#a3a3a3] mb-2">Email Address</label>
-                    <input 
-                      type="email" 
-                      required
-                      value={profileData.email}
-                      onChange={(e) => setProfileData({...profileData, email: e.target.value})}
-                      className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-white focus:border-[#d2f000] outline-none"
-                    />
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block text-sm text-[#a3a3a3] mb-2">Phone Number</label>
-                    <input 
-                      type="text" 
-                      value={profileData.phone}
-                      onChange={(e) => setProfileData({...profileData, phone: e.target.value})}
-                      className="w-full max-w-md bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-white focus:border-[#d2f000] outline-none"
-                    />
-                  </div>
-                </div>
-                <div className="pt-4 flex justify-end">
-                  <button type="submit" className="bg-[#d2f000] text-black font-medium px-6 py-2 rounded-lg hover:bg-[#b8d400]">
-                    Update Profile
-                  </button>
-                </div>
-              </form>
-            </div>
-
-            {/* Change Password */}
-            <div className="bg-[#141414] border border-[#262626] rounded-xl p-6">
-              <h2 className="text-lg font-bold text-white mb-6">Change Password</h2>
-              <form onSubmit={handleChangePassword} className="space-y-4 max-w-md">
-                <div>
-                  <label className="block text-sm text-[#a3a3a3] mb-2">Current Password</label>
-                  <input 
-                    type="password" 
-                    required
-                    value={passwords.current}
-                    onChange={(e) => setPasswords({...passwords, current: e.target.value})}
-                    className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-white focus:border-[#d2f000] outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-[#a3a3a3] mb-2">New Password</label>
-                  <input 
-                    type="password" 
-                    required
-                    value={passwords.new}
-                    onChange={(e) => setPasswords({...passwords, new: e.target.value})}
-                    className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-white focus:border-[#d2f000] outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-[#a3a3a3] mb-2">Confirm New Password</label>
-                  <input 
-                    type="password" 
-                    required
-                    value={passwords.confirm}
-                    onChange={(e) => setPasswords({...passwords, confirm: e.target.value})}
-                    className="w-full bg-[#1a1a1a] border border-[#262626] rounded-lg px-3 py-2 text-white focus:border-[#d2f000] outline-none"
-                  />
-                </div>
-                <div className="pt-4">
-                  <button type="submit" className="border border-[#262626] text-white px-6 py-2 rounded-lg hover:bg-[#1a1a1a]">
-                    Change Password
-                  </button>
-                </div>
-              </form>
-            </div>
-
-          </div>
-        </div>
+        )}
       </div>
-
-      {/* Toast */}
-      {toast && (
-        <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-[#262626] text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in z-50">
-          <span className="material-symbols-outlined text-[#d2f000] text-[20px]">info</span>
-          <span className="text-sm font-medium">{toast}</span>
-        </div>
-      )}
     </div>
   );
 }

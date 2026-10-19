@@ -78,7 +78,7 @@ Any product sent back without prior authorization may not be accepted or process
 
 ## **9. Official Payment & Fraud Warning** 
 
-#### **Official UPI ID: paytm.s1qzmi4@pty** 
+#### **Official UPI ID: 8639654299@ybl** 
 
 The above UPI ID is the official UPI ID designated by CLAPCULTURE for payment collection through Paytm for Business. 
 

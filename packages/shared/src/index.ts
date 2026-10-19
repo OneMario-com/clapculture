@@ -51,6 +51,84 @@ export interface CartItem {
   deliveryFee?: number;
 }
 
+export interface ShippingCalculation {
+  fee: number;
+  isFree: boolean;
+  reason: 'all_free' | 'threshold' | 'custom' | 'standard';
+}
+
+type ShippableItem = Pick<CartItem, 'price' | 'quantity' | 'freeShipping' | 'deliveryChargeEnabled' | 'deliveryFee'>;
+
+/**
+ * Shipping fee rule shared by the cart (what the customer is shown and pays)
+ * and the order API (what gets recorded), so the two can never disagree.
+ */
+export function calculateShipping(items: ShippableItem[], threshold = 999, defaultFee = 49): ShippingCalculation {
+  if (items.length === 0) {
+    return { fee: 0, isFree: true, reason: 'all_free' };
+  }
+
+  // 1. If ALL items in cart have freeShipping: true
+  if (items.every((item) => item.freeShipping === true)) {
+    return { fee: 0, isFree: true, reason: 'all_free' };
+  }
+
+  // 2. If any items have custom delivery charge enabled
+  const itemsWithCustomFee = items.filter(
+    (item) => item.deliveryChargeEnabled && typeof item.deliveryFee === 'number' && item.deliveryFee > 0
+  );
+  if (itemsWithCustomFee.length > 0) {
+    const maxCustomFee = Math.max(...itemsWithCustomFee.map((i) => i.deliveryFee || 0));
+    return { fee: maxCustomFee, isFree: false, reason: 'custom' };
+  }
+
+  // 3. Store threshold policy (Free above threshold, otherwise default shipping fee)
+  const subtotal = items.reduce((total, item) => total + item.price * item.quantity, 0);
+  if (subtotal >= threshold) {
+    return { fee: 0, isFree: true, reason: 'threshold' };
+  }
+
+  return { fee: defaultFee, isFree: false, reason: 'standard' };
+}
+
+/** Discount code as configured in the admin Discounts page. */
+export interface DiscountRule {
+  code: string;
+  /** 'Percentage' | 'Flat' | 'Free Shipping' (older records may use 'PERCENTAGE' / 'FIXED'). */
+  type: string;
+  value: number;
+  minOrder?: number | null;
+}
+
+export interface DiscountResult {
+  eligible: boolean;
+  /** Amount taken off the order total (for free shipping: the shipping fee). */
+  amount: number;
+  reason?: string;
+}
+
+/**
+ * Discount rule shared by checkout (what the customer is shown and pays) and
+ * the order API (what gets recorded).
+ */
+export function calculateDiscount(rule: DiscountRule, subtotal: number, shippingFee: number): DiscountResult {
+  const minOrder = Number(rule.minOrder) || 0;
+  if (subtotal < minOrder) {
+    return { eligible: false, amount: 0, reason: `This code needs a minimum order of ₹${minOrder}.` };
+  }
+
+  const type = String(rule.type || '').toLowerCase();
+  const value = Math.max(0, Number(rule.value) || 0);
+
+  if (type.includes('ship')) {
+    return { eligible: true, amount: Math.max(0, shippingFee) };
+  }
+  if (type.startsWith('percent')) {
+    return { eligible: true, amount: Math.min(subtotal, Math.round((subtotal * Math.min(value, 100)) / 100)) };
+  }
+  return { eligible: true, amount: Math.min(subtotal, Math.round(value)) };
+}
+
 export interface OrderItem {
   id: string;
   productId: string;

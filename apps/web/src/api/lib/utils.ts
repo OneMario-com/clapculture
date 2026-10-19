@@ -1,42 +1,5 @@
 import { Context } from 'hono';
-import { Query, Databases } from 'node-appwrite';
 import { AppwriteEnv } from './appwrite';
-
-export const getNextSequentialOrderId = async (databases: Databases, dbId: string): Promise<string> => {
-  try {
-    const list = await databases.listDocuments(dbId, 'orders', [
-      Query.limit(100),
-      Query.orderDesc('$createdAt'),
-    ]);
-
-    let highestSeq = 1000;
-    for (const doc of list.documents) {
-      const raw = String(doc.orderId || '').replace('#', '').trim();
-      const match = raw.match(/^CLAP(\d+)$/i);
-      if (match) {
-        const num = parseInt(match[1], 10);
-        if (num >= 1001 && num < 999999 && num > highestSeq) {
-          highestSeq = num;
-        }
-      }
-    }
-
-    // Safety fallback: Ensure sequence is at least 1000 + total orders
-    if (list.total && 1000 + list.total > highestSeq) {
-      highestSeq = 1000 + list.total;
-    }
-
-    const nextNum = highestSeq + 1;
-    const padded = String(nextNum).padStart(5, '0');
-    return `#CLAP${padded}`;
-  } catch {
-    return '#CLAP01021';
-  }
-};
-
-export const generateOrderId = (): string => {
-  return '#CLAP01001';
-};
 
 export const slugify = (text: string): string => {
   return text
@@ -60,4 +23,61 @@ export const getDbId = (c: Context): string => {
 
 export const getEnv = (c: Context): AppwriteEnv => {
   return c.env && Object.keys(c.env).length > 0 ? (c.env as AppwriteEnv) : (process.env as AppwriteEnv);
+};
+
+/**
+ * Keep only a collection's real attributes from a request body. Appwrite
+ * rejects the whole write if it contains an unknown attribute (or a system
+ * field like $id), so stray fields sent by a form would silently break saves.
+ */
+export const pickFields = (body: unknown, fields: readonly string[]): Record<string, unknown> => {
+  const source = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const picked: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (source[field] !== undefined) picked[field] = source[field];
+  }
+  return picked;
+};
+
+/** Drop Appwrite system fields ($id, $createdAt, …) from a request body. */
+export const withoutSystemFields = (body: unknown): Record<string, unknown> => {
+  const source = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(source).filter(([key]) => !key.startsWith('$')));
+};
+
+export const getClientIp = (c: Context): string => {
+  return (
+    c.req.header('cf-connecting-ip') ||
+    c.req.header('x-forwarded-for')?.split(',')[0].trim() ||
+    c.req.header('x-real-ip') ||
+    'unknown'
+  );
+};
+
+// Where @cloudflare/next-on-pages exposes the current request's context
+// (the same lookup its getRequestContext() helper performs).
+const CLOUDFLARE_REQUEST_CONTEXT = Symbol.for('__cloudflare-request-context__');
+
+/**
+ * Keep background work (emails, customer sync) alive after the response is sent.
+ * On Cloudflare a promise that is not registered with waitUntil can be cut off
+ * as soon as the response returns; in `next dev` there is no request context,
+ * so the promise simply runs on.
+ */
+export const runInBackground = (task: Promise<unknown>, label = 'Background task'): void => {
+  const guarded = task.catch((e) => console.log(`${label} notice:`, (e as Error)?.message || e));
+  const context = (globalThis as Record<symbol, { ctx?: { waitUntil?: (p: Promise<unknown>) => void } } | undefined>)[
+    CLOUDFLARE_REQUEST_CONTEXT
+  ];
+  context?.ctx?.waitUntil?.(guarded);
+};
+
+/** Escape user-supplied text before inserting it into an HTML email. */
+export const escapeHtml = (value: unknown): string => {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 };

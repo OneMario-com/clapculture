@@ -144,7 +144,7 @@ For payments made directly through an officially provided UPI payment option, cu
 
 OFFICIAL CLAPCULTURE UPI ID 
 
-#### **paytm.s1qzmi4@pty** 
+#### **8639654299@ybl** 
 
 This is the UPI ID designated by CLAPCULTURE for its official payment collection arrangement through **Paytm for Business** . 
 
@@ -162,7 +162,7 @@ CLAPCULTURE will not ask customers to redirect a payment to a different UPI ID t
 
 If you receive a suspicious payment request, stop the transaction and contact CLAPCULTURE through our official support channels. 
 
-**Always verify: paytm.s1qzmi4@pty before making a direct UPI payment.** 
+**Always verify: 8639654299@ybl before making a direct UPI payment.** 
 
 ## 9. SHIPPING AND DELIVERY 
 
@@ -468,7 +468,7 @@ BEFORE YOU PAY — VERIFY THE UPI ID
 
 #### **Official CLAPCULTURE UPI ID:** 
 
-paytm.s1qzmi4@pty 
+8639654299@ybl 
 
 #### **Official payment arrangement: Paytm for Business** 
 

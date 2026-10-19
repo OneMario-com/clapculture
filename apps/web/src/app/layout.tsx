@@ -31,9 +31,9 @@ export const metadata: Metadata = {
     description: "Premium streetwear for the rebels, the dreamers & the doers. Shop exclusive drops, oversized tees, hoodies, and headwear.",
     siteName: "CLAPCULTURE",
     images: [{
-      url: "/og-image.jpg",
-      width: 1200,
-      height: 630,
+      url: "/herobg1-desktop.png",
+      width: 1448,
+      height: 1086,
       alt: "CLAPCULTURE Premium Streetwear"
     }]
   },
@@ -41,7 +41,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "CLAPCULTURE | Premium Streetwear",
     description: "Premium streetwear for the rebels, the dreamers & the doers.",
-    images: ["/og-image.jpg"],
+    images: ["/herobg1-desktop.png"],
   },
   icons: {
     icon: [

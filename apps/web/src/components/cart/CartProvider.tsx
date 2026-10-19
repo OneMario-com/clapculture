@@ -1,14 +1,9 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { CartItem, Product, Size } from '@clapculture/shared';
-import { generateOrderId } from '@/lib/utils';
+import { CartItem, Product, Size, ShippingCalculation, calculateShipping } from '@clapculture/shared';
 
-export interface ShippingCalculation {
-  fee: number;
-  isFree: boolean;
-  reason: 'all_free' | 'threshold' | 'custom' | 'standard';
-}
+export type { ShippingCalculation };
 
 interface CartContextType {
   items: CartItem[];
@@ -25,22 +20,42 @@ interface CartContextType {
 
 const CartContext = createContext<CartContextType | undefined>(undefined);
 
+// A cart holds at most one line per product + size, so that pair is a stable unique line id.
+const cartLineId = (productId: string, size: string) => `${productId}-${size}`;
+
+// Carts saved by older builds gave every line the same id ("#CLAP01001"), which made
+// remove/update act on every line at once. Re-key them and merge duplicate lines.
+function normalizeStoredCart(stored: CartItem[]): CartItem[] {
+  const lines = new Map<string, CartItem>();
+  for (const item of Array.isArray(stored) ? stored : []) {
+    if (!item || !item.productId) continue;
+    const id = cartLineId(item.productId, item.size);
+    const existing = lines.get(id);
+    lines.set(id, existing ? { ...existing, quantity: existing.quantity + item.quantity } : { ...item, id });
+  }
+  return [...lines.values()];
+}
+
 export function CartProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<CartItem[]>([]);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
 
-  // Load from localStorage only after component mounts on client
+  // Load from localStorage only after component mounts on client (deferred a
+  // tick, so the first client render matches the server-rendered empty cart)
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem('clapculture_cart');
-      if (stored) {
-        setItems(JSON.parse(stored));
+    const timer = setTimeout(() => {
+      try {
+        const stored = localStorage.getItem('clapculture_cart');
+        if (stored) {
+          setItems(normalizeStoredCart(JSON.parse(stored)));
+        }
+      } catch (e) {
+        console.error('Failed to load cart from localStorage', e);
       }
-    } catch (e) {
-      console.error('Failed to load cart from localStorage', e);
-    }
-    setIsHydrated(true);
+      setIsHydrated(true);
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   // Save to localStorage only after initial client hydration
@@ -71,7 +86,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
         );
       }
       const newItem: CartItem = {
-        id: generateOrderId(),
+        id: cartLineId(product.id, size),
         productId: product.id,
         name: product.name,
         image: product.images[0] || '',
@@ -107,34 +122,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
   const getCartCount = () => items.reduce((count, item) => count + item.quantity, 0);
 
-  const getShippingFee = (threshold = 999, defaultFee = 49): ShippingCalculation => {
-    if (items.length === 0) {
-      return { fee: 0, isFree: true, reason: 'all_free' };
-    }
-
-    // 1. If ALL items in cart have freeShipping: true
-    const allFreeShipping = items.every((item) => item.freeShipping === true);
-    if (allFreeShipping) {
-      return { fee: 0, isFree: true, reason: 'all_free' };
-    }
-
-    // 2. If any items have custom delivery charge enabled
-    const itemsWithCustomFee = items.filter(
-      (item) => item.deliveryChargeEnabled && typeof item.deliveryFee === 'number' && item.deliveryFee > 0
-    );
-    if (itemsWithCustomFee.length > 0) {
-      const maxCustomFee = Math.max(...itemsWithCustomFee.map((i) => i.deliveryFee || 0));
-      return { fee: maxCustomFee, isFree: false, reason: 'custom' };
-    }
-
-    // 3. Store threshold policy (Free above threshold, otherwise default shipping fee)
-    const subtotal = getCartTotal();
-    if (subtotal >= threshold) {
-      return { fee: 0, isFree: true, reason: 'threshold' };
-    }
-
-    return { fee: defaultFee, isFree: false, reason: 'standard' };
-  };
+  const getShippingFee = (threshold = 999, defaultFee = 49): ShippingCalculation =>
+    calculateShipping(items, threshold, defaultFee);
 
   return (
     <CartContext.Provider

@@ -85,7 +85,7 @@ export function MobileMenu({ isOpen, onClose }: MobileMenuProps) {
 
         {/* Developer Credit Footer */}
         <div className="text-[11px] font-label-caps text-gray-500 uppercase tracking-widest text-center pt-2 border-t border-charcoal/40">
-          Design and developed by <a href="https://vcard.stemlen.com/u/surendra" target="_blank" rel="noopener noreferrer" className="text-electric-lime font-bold hover:underline">surendra.codes</a>
+          Design and developed by <a href="https://onemario.com" target="_blank" rel="noopener noreferrer" className="text-electric-lime font-bold hover:underline">One Mario</a>
         </div>
       </div>
     </div>

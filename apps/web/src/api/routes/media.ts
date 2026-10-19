@@ -2,21 +2,26 @@ import { Hono } from 'hono';
 import { adminAuth } from '../middleware/auth';
 import { uploadFile, getFileUrl, deleteFile } from '../lib/storage';
 import { getAppwriteClient } from '../lib/appwrite';
-import { getEnv } from '../lib/utils';
+import { getEnv, runInBackground } from '../lib/utils';
 
 const media = new Hono();
 const BUCKET_ID = 'media';
+const FILE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,35}$/;
+
+// Edge cache key depends only on the file id, so extra query parameters can't
+// be used to bypass the cache and re-fetch from Appwrite.
+const fileCacheKey = (requestUrl: string, id: string) =>
+  new Request(new URL(`/api/media/file/${id}`, requestUrl).toString(), { method: 'GET' });
 
 // Public CDN-cached image proxy for Appwrite storage files
 media.get('/file/:id', async (c) => {
   try {
     const id = c.req.param('id') || '';
-    if (!id) {
-      return c.json({ error: 'File ID required' }, 400);
+    if (!FILE_ID_PATTERN.test(id)) {
+      return c.json({ error: 'Valid file ID required' }, 400);
     }
 
-    const cacheUrl = new URL(c.req.url);
-    const cacheKey = new Request(cacheUrl.toString(), { method: 'GET' });
+    const cacheKey = fileCacheKey(c.req.url, id);
     
     // 1. Check Cloudflare Global Edge Cache
     let cfCache: Cache | undefined;
@@ -38,8 +43,12 @@ media.get('/file/:id', async (c) => {
     
     const appwriteUrl = `${endpoint}/storage/buckets/${BUCKET_ID}/files/${id}/view?project=${projectId}`;
     
-    // Fetch from Appwrite Storage with Cloudflare cache headers
+    // Fetch from Appwrite Storage with Cloudflare cache headers. The API key lets
+    // this proxy serve files even when the bucket has no public read access
+    // (which also stops anyone from listing every uploaded file).
+    const apiKey = env.APPWRITE_API_KEY || process.env.APPWRITE_API_KEY || '';
     const res = await fetch(appwriteUrl, {
+      headers: apiKey ? { 'X-Appwrite-Project': projectId, 'X-Appwrite-Key': apiKey } : undefined,
       // @ts-expect-error Cloudflare specific options
       cf: {
         cacheEverything: true,
@@ -70,13 +79,7 @@ media.get('/file/:id', async (c) => {
 
     // Save to Cloudflare Edge Cache for future requests
     if (cfCache) {
-      try {
-        c.executionCtx.waitUntil(cfCache.put(cacheKey, response.clone()));
-      } catch {
-        try {
-          await cfCache.put(cacheKey, response.clone());
-        } catch {}
-      }
+      runInBackground(cfCache.put(cacheKey, response.clone()), 'Media edge cache');
     }
 
     return response;
@@ -167,9 +170,22 @@ media.get('/', adminAuth, async (c) => {
 media.delete('/:id', adminAuth, async (c) => {
   try {
     const id = c.req.param('id') || '';
+    if (!FILE_ID_PATTERN.test(id)) {
+      return c.json({ success: false, error: 'Valid file ID required' }, 400);
+    }
     const env = getEnv(c);
-    await deleteFile(env, BUCKET_ID, id);
-    
+    const deleted = await deleteFile(env, BUCKET_ID, id);
+    if (!deleted) {
+      return c.json({ success: false, error: 'Appwrite could not delete this file. Please try again.' }, 502);
+    }
+
+    // Best effort: edge caches are per data centre, so this only clears the local copy.
+    try {
+      if (typeof caches !== 'undefined' && (caches as unknown as Record<string, Cache>).default) {
+        await (caches as unknown as Record<string, Cache>).default.delete(fileCacheKey(c.req.url, id));
+      }
+    } catch {}
+
     return c.json({ success: true, data: { deleted: true } });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Internal server error';

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { adminFetch } from '@/lib/admin-fetch';
 
 type NotificationType = 'order' | 'payment' | 'stock' | 'system' | 'customer';
 
@@ -27,15 +28,11 @@ export default function NotificationsPage() {
     async function loadNotifications() {
       try {
         setLoading(true);
-        const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-        
         // 1. Fetch live orders
-        const ordersRes = await fetch('/api/orders?limit=50', {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const ordersRes = await adminFetch('/api/orders?limit=50');
 
         // 2. Fetch live products for stock alerts
-        const productsRes = await fetch('/api/products?limit=50');
+        const productsRes = await adminFetch('/api/products?limit=50');
 
         const items: NotificationItem[] = [];
 
@@ -52,6 +49,7 @@ export default function NotificationsPage() {
               }
 
               const orderNum = String(o.orderId || o.$id).replace('#', '');
+              const orderHref = `/admin/orders/${encodeURIComponent(String(o.$id || orderNum))}`;
               const totalAmount = o.total ? `₹${o.total}` : '';
               const dateStr = o.$createdAt ? new Date(o.$createdAt as string).toLocaleString('en-IN') : 'Recent';
 
@@ -63,7 +61,7 @@ export default function NotificationsPage() {
                 description: `Customer ${customerName} placed an order for ${totalAmount}. Status: ${o.orderStatus || 'PLACED'}`,
                 timestamp: dateStr,
                 read: false,
-                link: `/admin/orders/${orderNum}`,
+                link: orderHref,
               });
 
               // Payment Notification
@@ -75,7 +73,7 @@ export default function NotificationsPage() {
                   description: `UPI Reference / UTR: ${o.transactionId || 'Pending'}. Amount: ${totalAmount}. Click to verify.`,
                   timestamp: dateStr,
                   read: false,
-                  link: `/admin/orders/${orderNum}`,
+                  link: orderHref,
                 });
               }
             });

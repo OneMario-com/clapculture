@@ -1,49 +1,75 @@
-import { Query, ID } from 'node-appwrite';
+import { Query, ID, Users } from 'node-appwrite';
 import { getAppwriteClient, AppwriteEnv } from './appwrite';
 import { sendMail, MailResult, MailOptions } from './mailer';
 import { buildClapCultureEmailTemplate } from './email-template';
+import { redis } from './redis';
+import { escapeHtml } from './utils';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CORE DISPATCHER
 // ─────────────────────────────────────────────────────────────────────────────
+
+const USER_ID_CACHE_TTL = 30 * 24 * 60 * 60; // 30 days
+const userIdCacheKey = (email: string) => `cc:uid:${email}`;
+
+/**
+ * Find (or create) the Appwrite Auth user Appwrite Messaging needs as a
+ * recipient. Without Redis this costs 1-2 Appwrite calls per email; with Redis
+ * the id is cached so repeat recipients cost none.
+ */
+async function resolveMessagingUserId(users: Users, email: string): Promise<string | null> {
+  const findByEmail = async () => {
+    const found = await users.list([Query.equal('email', email), Query.limit(1)]);
+    return found.users[0]?.$id ?? null;
+  };
+
+  let userId = await findByEmail();
+  if (!userId) {
+    try {
+      // Create user in Appwrite Auth so Appwrite Messaging can deliver to them
+      const newUser = await users.create(ID.unique(), email, undefined, undefined, email.split('@')[0]);
+      userId = newUser.$id;
+    } catch (err) {
+      // 409: created concurrently by another request, so look it up once more.
+      if ((err as { code?: number })?.code !== 409) throw err;
+      userId = await findByEmail();
+    }
+  }
+
+  if (userId) {
+    await redis(['SET', userIdCacheKey(email), userId, 'EX', USER_ID_CACHE_TTL]);
+  }
+  return userId;
+}
 
 export async function dispatchPlatformEmail(
   options: MailOptions,
   env?: AppwriteEnv
 ): Promise<MailResult> {
   const recipients = Array.isArray(options.to) ? options.to : [options.to];
+  const cleanEmails = recipients.map((email) => email.toLowerCase().trim());
+  let usedCachedIds = false;
 
   // 1. Try Appwrite Messaging Service (Logs in Appwrite Console -> Messaging -> Messages)
   try {
     const { client, messaging, users } = getAppwriteClient(env);
     if (client && messaging && users) {
       const userIds: string[] = [];
+      const cachedIds = await redis(['MGET', ...cleanEmails.map(userIdCacheKey)]);
 
-      for (const email of recipients) {
-        const cleanEmail = email.toLowerCase().trim();
+      for (const [index, cleanEmail] of cleanEmails.entries()) {
+        const cachedId = Array.isArray(cachedIds) ? cachedIds[index] : null;
+        if (typeof cachedId === 'string' && cachedId) {
+          userIds.push(cachedId);
+          usedCachedIds = true;
+          continue;
+        }
         try {
-          // Check if Appwrite user already exists
-          const existing = await users.list([Query.equal('email', cleanEmail), Query.limit(1)]);
-          if (existing.users.length > 0) {
-            userIds.push(existing.users[0].$id);
-          } else {
-            // Create user in Appwrite Auth so Appwrite Messaging can deliver to them
-            const newUser = await users.create(
-              ID.unique(),
-              cleanEmail,
-              undefined,
-              undefined,
-              cleanEmail.split('@')[0]
-            );
-            userIds.push(newUser.$id);
-          }
-        } catch {
-          // If already exists or error, list all users to find ID
-          try {
-            const allUsers = await users.list([Query.limit(100)]);
-            const matched = allUsers.users.find((u) => u.email.toLowerCase() === cleanEmail);
-            if (matched) userIds.push(matched.$id);
-          } catch {}
+          const userId = await resolveMessagingUserId(users, cleanEmail);
+          if (userId) userIds.push(userId);
+        } catch (lookupErr: unknown) {
+          const msg = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+          console.log(`ℹ️ [Appwrite Messaging] Could not resolve recipient ${cleanEmail}: ${msg}`);
         }
       }
 
@@ -71,6 +97,10 @@ export async function dispatchPlatformEmail(
   } catch (appwriteErr: unknown) {
     const msg = appwriteErr instanceof Error ? appwriteErr.message : String(appwriteErr);
     console.log(`ℹ️ [Appwrite Messaging -> Direct SMTP Fallback]: ${msg}`);
+    // A cached id may point at a deleted Appwrite user; drop it so the next email re-resolves it.
+    if (usedCachedIds) {
+      await redis(['DEL', ...cleanEmails.map(userIdCacheKey)]);
+    }
   }
 
   // 2. Direct Gmail SMTP Delivery via Nodemailer
@@ -225,6 +255,7 @@ export async function sendOtpEmail(
   data: OtpEmailData
 ): Promise<MailResult> {
   const expiry = data.expiryMinutes || 10;
+  const otp = escapeHtml(data.otp);
   const purposeLabel =
     data.purpose === 'LOGIN' ? 'ACCOUNT LOGIN' :
     data.purpose === 'CHECKOUT' ? 'CHECKOUT VERIFICATION' :
@@ -244,7 +275,7 @@ export async function sendOtpEmail(
         ONE-TIME PASSWORD
       </span>
       <div style="font-size: 40px; font-weight: 900; color: #d2f000; font-family: monospace; letter-spacing: 0.35em; margin: 12px 0 6px 0; padding-left: 0.35em;">
-        ${data.otp}
+        ${otp}
       </div>
       <div style="font-size: 11px; color: #737373; font-family: monospace; margin-top: 8px;">
         &bull; VALID FOR <span style="color: #ffffff; font-weight: bold;">${expiry} MINUTES</span> ONLY &bull;
@@ -262,14 +293,14 @@ export async function sendOtpEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Your CLAPCULTURE OTP is ${data.otp} — Valid for ${expiry} mins`,
+    preheader: `Your CLAPCULTURE OTP is ${otp} — Valid for ${expiry} mins`,
     badge: 'SECURITY VERIFICATION',
     badgeColor: 'lime',
     title: 'YOUR VERIFICATION CODE',
     subtitle: purposeLabel,
     customerName: data.customerName,
     bodyHtml,
-    footerNotice: `This single-use code was requested for ${data.toEmail}. Expires in ${expiry} minutes.`,
+    footerNotice: `This single-use code was requested for ${escapeHtml(data.toEmail)}. Expires in ${expiry} minutes.`,
   });
 
   return dispatchPlatformEmail(
@@ -290,20 +321,22 @@ export async function sendOrderConfirmationEmail(
   env: AppwriteEnv | undefined,
   data: OrderEmailData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const trackUrl = `${baseUrl}/track-order?orderId=${data.orderId}&email=${encodeURIComponent(data.toEmail)}`;
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+  const trackUrl = `${baseUrl}/track-order?orderId=${encodeURIComponent(data.orderId)}&email=${encodeURIComponent(data.toEmail)}`;
+
+  const orderId = escapeHtml(data.orderId);
 
   const itemsHtml = data.items
     .map(
       (item) => `
     <tr style="border-bottom: 1px solid #222222;">
       <td style="padding: 14px 0; font-weight: 700; color: #ffffff;">
-        ${item.name}
+        ${escapeHtml(item.name)}
         <div style="font-size: 11px; color: #737373; font-weight: 400; text-transform: uppercase; margin-top: 2px;">
-          SIZE: <span style="color: #d2f000; font-weight: bold;">${item.size}</span>
+          SIZE: <span style="color: #d2f000; font-weight: bold;">${escapeHtml(item.size)}</span>
         </div>
       </td>
-      <td style="padding: 14px 0; color: #a3a3a3; text-align: center; font-family: monospace; font-size: 13px;">x${item.quantity}</td>
+      <td style="padding: 14px 0; color: #a3a3a3; text-align: center; font-family: monospace; font-size: 13px;">x${escapeHtml(item.quantity)}</td>
       <td style="padding: 14px 0; color: #d2f000; font-weight: 800; text-align: right; font-family: monospace; font-size: 14px;">₹${item.price * item.quantity}</td>
     </tr>
   `
@@ -312,7 +345,7 @@ export async function sendOrderConfirmationEmail(
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0; font-size: 15px;">
-      Your order <strong style="color: #d2f000; font-family: monospace; font-size: 16px;">#${data.orderId}</strong> has been confirmed and placed with our fulfillment crew!
+      Your order <strong style="color: #d2f000; font-family: monospace; font-size: 16px;">#${orderId}</strong> has been confirmed and placed with our fulfillment crew!
     </p>
 
     <!-- ORDER SUMMARY TABLE -->
@@ -322,7 +355,7 @@ export async function sendOrderConfirmationEmail(
           ORDER RECEIPT
         </span>
         <span style="font-size: 11px; color: #a3a3a3; font-family: monospace;">
-          ${data.orderDate || new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+          ${data.orderDate ? escapeHtml(data.orderDate) : new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
         </span>
       </div>
 
@@ -368,9 +401,9 @@ export async function sendOrderConfirmationEmail(
         DELIVERY DESTINATION
       </div>
       <div style="color: #ffffff; font-size: 13px; line-height: 1.6;">
-        <strong>${data.customerName}</strong><br/>
-        ${data.shippingAddress}<br/>
-        ${data.customerPhone ? `<span style="color: #a3a3a3;">Contact: ${data.customerPhone}</span>` : ''}
+        <strong>${escapeHtml(data.customerName)}</strong><br/>
+        ${escapeHtml(data.shippingAddress)}<br/>
+        ${data.customerPhone ? `<span style="color: #a3a3a3;">Contact: ${escapeHtml(data.customerPhone)}</span>` : ''}
       </div>
     </div>
 
@@ -380,10 +413,10 @@ export async function sendOrderConfirmationEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Order #${data.orderId} Confirmed — CLAPCULTURE`,
+    preheader: `Order #${orderId} Confirmed — CLAPCULTURE`,
     badge: 'BOOKING CONFIRMED',
     badgeColor: 'lime',
-    title: `ORDER #${data.orderId}`,
+    title: `ORDER #${orderId}`,
     subtitle: 'THANK YOU FOR JOINING THE CULTURE',
     customerName: data.customerName,
     bodyHtml,
@@ -391,7 +424,7 @@ export async function sendOrderConfirmationEmail(
     buttonUrl: trackUrl,
     secondaryButtonText: 'VISIT STORE',
     secondaryButtonUrl: `${baseUrl}/shop`,
-    footerNotice: `This email is a formal confirmation of order #${data.orderId}. Keep this email for your records.`,
+    footerNotice: `This email is a formal confirmation of order #${orderId}. Keep this email for your records.`,
   });
 
   return dispatchPlatformEmail(
@@ -412,12 +445,14 @@ export async function sendPaymentVerifiedEmail(
   env: AppwriteEnv | undefined,
   data: PaymentVerifiedData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const trackUrl = `${baseUrl}/track-order?orderId=${data.orderId}&email=${encodeURIComponent(data.toEmail)}`;
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+  const trackUrl = `${baseUrl}/track-order?orderId=${encodeURIComponent(data.orderId)}&email=${encodeURIComponent(data.toEmail)}`;
+
+  const orderId = escapeHtml(data.orderId);
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">
-      Awesome news! Your payment for Order <strong style="color: #d2f000; font-family: monospace;">#${data.orderId}</strong> has been <span style="color: #4ade80; font-weight: 900;">VERIFIED & RECEIVED</span> by our accounts department.
+      Awesome news! Your payment for Order <strong style="color: #d2f000; font-family: monospace;">#${orderId}</strong> has been <span style="color: #4ade80; font-weight: 900;">VERIFIED & RECEIVED</span> by our accounts department.
     </p>
 
     <div style="background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 20px; margin: 20px 0; text-align: center;">
@@ -429,7 +464,7 @@ export async function sendPaymentVerifiedEmail(
       </div>
       ${data.transactionId ? `
       <div style="font-family: monospace; font-size: 12px; color: #a3a3a3; margin-top: 8px; border-top: 1px solid #222; padding-top: 8px;">
-        UTR / Ref: <span style="color: #d2f000;">${data.transactionId}</span>
+        UTR / Ref: <span style="color: #d2f000;">${escapeHtml(data.transactionId)}</span>
       </div>` : ''}
     </div>
 
@@ -439,11 +474,11 @@ export async function sendPaymentVerifiedEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Payment Verified for Order #${data.orderId} — CLAPCULTURE`,
+    preheader: `Payment Verified for Order #${orderId} — CLAPCULTURE`,
     badge: 'PAYMENT VERIFIED',
     badgeColor: 'cyan',
     title: `PAYMENT RECEIVED`,
-    subtitle: `ORDER #${data.orderId}`,
+    subtitle: `ORDER #${orderId}`,
     customerName: data.customerName,
     bodyHtml,
     buttonText: 'VIEW ORDER TIMELINE',
@@ -468,12 +503,13 @@ export async function sendPaymentFailedEmail(
   env: AppwriteEnv | undefined,
   data: PaymentFailedData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const payUrl = `${baseUrl}/payment/${data.orderId}`;
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+  const payUrl = `${baseUrl}/payment/${encodeURIComponent(data.orderId)}`;
+  const orderId = escapeHtml(data.orderId);
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">
-      We were unable to verify your payment for Order <strong style="color: #ef4444; font-family: monospace;">#${data.orderId}</strong>.
+      We were unable to verify your payment for Order <strong style="color: #ef4444; font-family: monospace;">#${orderId}</strong>.
     </p>
 
     <div style="background-color: #0a0a0a; border: 1px solid #ef4444; border-radius: 8px; padding: 20px; margin: 20px 0; text-align: center;">
@@ -481,7 +517,7 @@ export async function sendPaymentFailedEmail(
         STATUS: ACTION REQUIRED
       </div>
       <div style="font-size: 16px; font-weight: 800; color: #ffffff; margin-top: 6px;">
-        ${data.reason || 'Payment screenshot or transaction reference could not be verified.'}
+        ${escapeHtml(data.reason || 'Payment screenshot or transaction reference could not be verified.')}
       </div>
     </div>
 
@@ -491,11 +527,11 @@ export async function sendPaymentFailedEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Action Required: Payment Pending for Order #${data.orderId}`,
+    preheader: `Action Required: Payment Pending for Order #${orderId}`,
     badge: 'PAYMENT PENDING',
     badgeColor: 'red',
     title: 'PAYMENT ACTION REQUIRED',
-    subtitle: `ORDER #${data.orderId}`,
+    subtitle: `ORDER #${orderId}`,
     customerName: data.customerName,
     bodyHtml,
     buttonText: 'COMPLETE PAYMENT NOW',
@@ -520,12 +556,14 @@ export async function sendShippingUpdateEmail(
   env: AppwriteEnv | undefined,
   data: ShippingUpdateData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const trackUrl = data.trackingUrl || `${baseUrl}/track-order?orderId=${data.orderId}&email=${encodeURIComponent(data.toEmail)}`;
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+  const trackUrl = data.trackingUrl || `${baseUrl}/track-order?orderId=${encodeURIComponent(data.orderId)}&email=${encodeURIComponent(data.toEmail)}`;
+
+  const orderId = escapeHtml(data.orderId);
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">
-      Your package for Order <strong style="color: #d2f000; font-family: monospace;">#${data.orderId}</strong> has officially been <span style="color: #38bdf8; font-weight: 900;">DISPATCHED</span> and is on its way to you!
+      Your package for Order <strong style="color: #d2f000; font-family: monospace;">#${orderId}</strong> has officially been <span style="color: #38bdf8; font-weight: 900;">DISPATCHED</span> and is on its way to you!
     </p>
 
     <!-- TRACKING CODE HIGHLIGHT BOX -->
@@ -534,10 +572,10 @@ export async function sendShippingUpdateEmail(
         COURIER TRACKING NUMBER
       </span>
       <div style="font-size: 26px; font-weight: 900; color: #d2f000; font-family: monospace; letter-spacing: 0.1em; margin: 8px 0;">
-        ${data.trackingNumber}
+        ${escapeHtml(data.trackingNumber)}
       </div>
       <div style="font-size: 12px; color: #737373;">
-        Courier: <strong style="color: #ffffff;">${data.courierName || 'Express Courier'}</strong> &bull; Est. Delivery: <strong style="color: #ffffff;">${data.estimatedDelivery || '2-4 Business Days'}</strong>
+        Courier: <strong style="color: #ffffff;">${escapeHtml(data.courierName || 'Express Courier')}</strong> &bull; Est. Delivery: <strong style="color: #ffffff;">${escapeHtml(data.estimatedDelivery || '2-4 Business Days')}</strong>
       </div>
     </div>
 
@@ -547,11 +585,11 @@ export async function sendShippingUpdateEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Your Order #${data.orderId} Has Shipped! — CLAPCULTURE`,
+    preheader: `Your Order #${orderId} Has Shipped! — CLAPCULTURE`,
     badge: 'PACKAGE DISPATCHED',
     badgeColor: 'amber',
     title: 'YOUR GEAR IS ON THE WAY',
-    subtitle: `ORDER #${data.orderId}`,
+    subtitle: `ORDER #${orderId}`,
     customerName: data.customerName,
     bodyHtml,
     buttonText: 'LIVE PACKAGE TRACKING',
@@ -576,12 +614,14 @@ export async function sendOutForDeliveryEmail(
   env: AppwriteEnv | undefined,
   data: OutForDeliveryData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const trackUrl = `${baseUrl}/track-order?orderId=${data.orderId}&email=${encodeURIComponent(data.toEmail)}`;
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+  const trackUrl = `${baseUrl}/track-order?orderId=${encodeURIComponent(data.orderId)}&email=${encodeURIComponent(data.toEmail)}`;
+
+  const orderId = escapeHtml(data.orderId);
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0; font-size: 15px;">
-      Get ready! Order <strong style="color: #d2f000; font-family: monospace;">#${data.orderId}</strong> is <span style="color: #d2f000; font-weight: 900;">OUT FOR DELIVERY TODAY</span>!
+      Get ready! Order <strong style="color: #d2f000; font-family: monospace;">#${orderId}</strong> is <span style="color: #d2f000; font-weight: 900;">OUT FOR DELIVERY TODAY</span>!
     </p>
 
     <div style="background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 20px; margin: 20px 0; text-align: center;">
@@ -590,11 +630,11 @@ export async function sendOutForDeliveryEmail(
         ARRIVING TODAY
       </div>
       <div style="font-size: 12px; color: #a3a3a3; margin-top: 6px;">
-        Tracking Ref: <span style="color: #d2f000; font-family: monospace;">${data.trackingNumber}</span>
+        Tracking Ref: <span style="color: #d2f000; font-family: monospace;">${escapeHtml(data.trackingNumber)}</span>
       </div>
       ${data.deliveryAgent ? `
       <div style="font-size: 12px; color: #737373; margin-top: 6px;">
-        Delivery Partner: <strong style="color: #fff;">${data.deliveryAgent}</strong> ${data.deliveryPhone ? `(${data.deliveryPhone})` : ''}
+        Delivery Partner: <strong style="color: #fff;">${escapeHtml(data.deliveryAgent)}</strong> ${data.deliveryPhone ? `(${escapeHtml(data.deliveryPhone)})` : ''}
       </div>` : ''}
     </div>
 
@@ -604,11 +644,11 @@ export async function sendOutForDeliveryEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Out for Delivery Today: Order #${data.orderId} — CLAPCULTURE`,
+    preheader: `Out for Delivery Today: Order #${orderId} — CLAPCULTURE`,
     badge: 'OUT FOR DELIVERY',
     badgeColor: 'lime',
     title: 'ARRIVING TODAY',
-    subtitle: `ORDER #${data.orderId}`,
+    subtitle: `ORDER #${orderId}`,
     customerName: data.customerName,
     bodyHtml,
     buttonText: 'TRACK LIVE DELIVERY',
@@ -633,12 +673,13 @@ export async function sendOrderDeliveredEmail(
   env: AppwriteEnv | undefined,
   data: OrderDeliveredData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const code = data.discountCode || 'REBEL10';
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+  const code = escapeHtml(data.discountCode || 'REBEL10');
+  const orderId = escapeHtml(data.orderId);
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">
-      Courier records confirm that Order <strong style="color: #d2f000; font-family: monospace;">#${data.orderId}</strong> has successfully been <span style="color: #4ade80; font-weight: 900;">DELIVERED</span>.
+      Courier records confirm that Order <strong style="color: #d2f000; font-family: monospace;">#${orderId}</strong> has successfully been <span style="color: #4ade80; font-weight: 900;">DELIVERED</span>.
     </p>
 
     <div style="background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 20px; margin: 20px 0; text-align: center;">
@@ -664,11 +705,11 @@ export async function sendOrderDeliveredEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Order #${data.orderId} Delivered — CLAPCULTURE`,
+    preheader: `Order #${orderId} Delivered — CLAPCULTURE`,
     badge: 'DELIVERED',
     badgeColor: 'lime',
     title: 'DELIVERY CONFIRMED',
-    subtitle: `ORDER #${data.orderId}`,
+    subtitle: `ORDER #${orderId}`,
     customerName: data.customerName,
     bodyHtml,
     buttonText: 'SHOP NEW DROPS',
@@ -693,11 +734,13 @@ export async function sendOrderCancelledEmail(
   env: AppwriteEnv | undefined,
   data: OrderCancelledData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+
+  const orderId = escapeHtml(data.orderId);
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">
-      Order <strong style="color: #ffffff; font-family: monospace;">#${data.orderId}</strong> has been <span style="color: #ef4444; font-weight: 900;">CANCELLED</span>.
+      Order <strong style="color: #ffffff; font-family: monospace;">#${orderId}</strong> has been <span style="color: #ef4444; font-weight: 900;">CANCELLED</span>.
     </p>
 
     <div style="background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 18px; margin: 20px 0;">
@@ -705,7 +748,7 @@ export async function sendOrderCancelledEmail(
         CANCELLATION DETAILS
       </div>
       <div style="font-size: 13px; color: #e5e5e5;">
-        ${data.reason || 'Cancelled upon customer request or payment timeout.'}
+        ${escapeHtml(data.reason || 'Cancelled upon customer request or payment timeout.')}
       </div>
       ${data.refundAmount ? `
       <div style="font-size: 13px; color: #d2f000; font-weight: bold; margin-top: 10px; border-top: 1px solid #222; padding-top: 10px;">
@@ -719,11 +762,11 @@ export async function sendOrderCancelledEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Order #${data.orderId} Cancelled — CLAPCULTURE`,
+    preheader: `Order #${orderId} Cancelled — CLAPCULTURE`,
     badge: 'ORDER CANCELLED',
     badgeColor: 'red',
     title: 'ORDER CANCELLED',
-    subtitle: `ORDER #${data.orderId}`,
+    subtitle: `ORDER #${orderId}`,
     customerName: data.customerName,
     bodyHtml,
     buttonText: 'VISIT STOREFRONT',
@@ -748,9 +791,11 @@ export async function sendRefundProcessedEmail(
   env: AppwriteEnv | undefined,
   data: RefundProcessedData
 ): Promise<MailResult> {
+  const orderId = escapeHtml(data.orderId);
+
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">
-      A refund for Order <strong style="color: #ffffff; font-family: monospace;">#${data.orderId}</strong> has been <span style="color: #4ade80; font-weight: 900;">SUCCESSFULLY PROCESSED</span>.
+      A refund for Order <strong style="color: #ffffff; font-family: monospace;">#${orderId}</strong> has been <span style="color: #4ade80; font-weight: 900;">SUCCESSFULLY PROCESSED</span>.
     </p>
 
     <div style="background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 20px; margin: 20px 0; text-align: center;">
@@ -761,7 +806,7 @@ export async function sendRefundProcessedEmail(
         ₹${data.refundAmount}
       </div>
       <div style="font-size: 12px; color: #a3a3a3; font-family: monospace;">
-        Refund Reference ID: <strong style="color: #fff;">${data.refundReference}</strong>
+        Refund Reference ID: <strong style="color: #fff;">${escapeHtml(data.refundReference)}</strong>
       </div>
     </div>
 
@@ -771,15 +816,15 @@ export async function sendRefundProcessedEmail(
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Refund Processed for Order #${data.orderId} (₹${data.refundAmount})`,
+    preheader: `Refund Processed for Order #${orderId} (₹${data.refundAmount})`,
     badge: 'REFUND PROCESSED',
     badgeColor: 'cyan',
     title: 'REFUND INITIATED',
-    subtitle: `ORDER #${data.orderId}`,
+    subtitle: `ORDER #${orderId}`,
     customerName: data.customerName,
     bodyHtml,
     buttonText: 'VISIT STORE',
-    buttonUrl: 'http://localhost:3000',
+    buttonUrl: env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com',
   });
 
   return dispatchPlatformEmail(
@@ -800,8 +845,9 @@ export async function sendNewsletterWelcomeEmail(
   env: AppwriteEnv | undefined,
   data: NewsletterWelcomeData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
   const code = data.discountCode || 'REBEL10';
+  const codeHtml = escapeHtml(code);
   const discount = data.discountPercentage || 10;
 
   const bodyHtml = `
@@ -815,7 +861,7 @@ export async function sendNewsletterWelcomeEmail(
         EXCLUSIVE ${discount}% WELCOME VOUCHER
       </span>
       <div style="font-size: 32px; font-weight: 900; color: #d2f000; font-family: monospace; letter-spacing: 0.15em; margin: 10px 0;">
-        ${code}
+        ${codeHtml}
       </div>
       <p style="font-size: 12px; color: #737373; margin: 0;">
         Apply this code during checkout on your first order for instant savings.
@@ -859,14 +905,14 @@ export async function sendAbandonedCartEmail(
   env: AppwriteEnv | undefined,
   data: AbandonedCartData
 ): Promise<MailResult> {
-  const code = data.discountCode || 'REBEL5';
+  const code = escapeHtml(data.discountCode || 'REBEL5');
 
   const itemsHtml = data.items
     .map(
       (item) => `
     <tr style="border-bottom: 1px solid #222;">
-      <td style="padding: 10px 0; color: #fff; font-weight: 700;">${item.name} (${item.size})</td>
-      <td style="padding: 10px 0; color: #a3a3a3; text-align: center;">x${item.quantity}</td>
+      <td style="padding: 10px 0; color: #fff; font-weight: 700;">${escapeHtml(item.name)} (${escapeHtml(item.size)})</td>
+      <td style="padding: 10px 0; color: #a3a3a3; text-align: center;">x${escapeHtml(item.quantity)}</td>
       <td style="padding: 10px 0; color: #d2f000; text-align: right; font-weight: bold; font-family: monospace;">₹${item.price * item.quantity}</td>
     </tr>`
     )
@@ -925,24 +971,26 @@ export async function sendContactInquiryEmail(
   data: ContactInquiryData
 ): Promise<{ customerResult: MailResult; adminResult: MailResult }> {
   const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || process.env.ADMIN_NOTIFICATION_EMAIL || 'clapcultureofficial@gmail.com';
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+
+  const name = escapeHtml(data.name);
+  const email = escapeHtml(data.email);
+  const subject = escapeHtml(data.subject);
 
   // 1. Customer Auto-Reply Email
+  // This goes to whatever address the visitor typed, so it must not echo their
+  // subject or message back (that would let anyone send arbitrary text from our domain).
   const customerBodyHtml = `
     <p style="margin: 0 0 16px 0;">
-      We have received your message regarding <strong style="color: #ffffff;">&ldquo;${data.subject}&rdquo;</strong>.
+      We have received your message and a member of our support crew will review it shortly.
     </p>
-    <div style="background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 18px; margin: 20px 0; font-size: 13px; color: #a3a3a3;">
-      <div style="font-size: 10px; font-weight: 800; color: #737373; text-transform: uppercase; margin-bottom: 6px; font-family: monospace;">YOUR MESSAGE TRANSMISSION:</div>
-      <div style="color: #ffffff; white-space: pre-wrap;">${data.message}</div>
-    </div>
     <p style="font-size: 13px; color: #a3a3a3; margin: 0;">
       Our support team operates 7 days a week and will respond to your inquiry within 24 hours.
     </p>
   `;
 
   const customerHtml = buildClapCultureEmailTemplate({
-    preheader: `We received your message: ${data.subject} — CLAPCULTURE Support`,
+    preheader: 'We received your message — CLAPCULTURE Support',
     badge: 'MESSAGE RECEIVED',
     badgeColor: 'lime',
     title: 'TRANSMISSION RECEIVED',
@@ -956,7 +1004,7 @@ export async function sendContactInquiryEmail(
   const customerResult = await dispatchPlatformEmail(
     {
       to: data.email,
-      subject: `We received your message: "${data.subject}" - CLAPCULTURE`,
+      subject: 'We received your message - CLAPCULTURE',
       html: customerHtml,
       replyTo: adminEmail,
     },
@@ -971,32 +1019,32 @@ export async function sendContactInquiryEmail(
     <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin: 16px 0; background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px;">
       <tr style="border-bottom: 1px solid #262626;">
         <td style="padding: 10px 14px; color: #737373; font-weight: 700; width: 100px;">SENDER</td>
-        <td style="padding: 10px 14px; color: #ffffff; font-weight: 700;">${data.name} &lt;${data.email}&gt;</td>
+        <td style="padding: 10px 14px; color: #ffffff; font-weight: 700;">${name} &lt;${email}&gt;</td>
       </tr>
       ${data.phone ? `
       <tr style="border-bottom: 1px solid #262626;">
         <td style="padding: 10px 14px; color: #737373; font-weight: 700;">PHONE</td>
-        <td style="padding: 10px 14px; color: #d2f000; font-family: monospace;">${data.phone}</td>
+        <td style="padding: 10px 14px; color: #d2f000; font-family: monospace;">${escapeHtml(data.phone)}</td>
       </tr>` : ''}
       <tr style="border-bottom: 1px solid #262626;">
         <td style="padding: 10px 14px; color: #737373; font-weight: 700;">SUBJECT</td>
-        <td style="padding: 10px 14px; color: #ffffff;">${data.subject}</td>
+        <td style="padding: 10px 14px; color: #ffffff;">${subject}</td>
       </tr>
       <tr>
         <td style="padding: 10px 14px; color: #737373; font-weight: 700; vertical-align: top;">MESSAGE</td>
-        <td style="padding: 10px 14px; color: #d4d4d4; white-space: pre-wrap;">${data.message}</td>
+        <td style="padding: 10px 14px; color: #d4d4d4; white-space: pre-wrap;">${escapeHtml(data.message)}</td>
       </tr>
     </table>
   `;
 
   const adminHtml = buildClapCultureEmailTemplate({
-    preheader: `[New Inquiry] ${data.name}: ${data.subject}`,
+    preheader: `[New Inquiry] ${name}: ${subject}`,
     badge: 'ADMIN INBOX ALERT',
     badgeColor: 'amber',
     title: 'NEW CONTACT INQUIRY',
-    subtitle: `${data.name} &bull; ${data.email}`,
+    subtitle: `${name} &bull; ${email}`,
     bodyHtml: adminBodyHtml,
-    buttonText: `REPLY TO ${data.name.toUpperCase()}`,
+    buttonText: `REPLY TO ${escapeHtml(data.name.toUpperCase())}`,
     buttonUrl: `mailto:${data.email}?subject=Re: ${encodeURIComponent(data.subject)}`,
     showSocials: false,
     footerNotice: 'Internal admin notification dispatched from CLAPCULTURE Web Portal.',
@@ -1024,26 +1072,27 @@ export async function sendAdminAlertEmail(
   data: AdminAlertData
 ): Promise<MailResult> {
   const adminEmail = env?.ADMIN_NOTIFICATION_EMAIL || process.env.ADMIN_NOTIFICATION_EMAIL || 'clapcultureofficial@gmail.com';
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0; font-size: 15px;">
-      ${data.message}
+      ${escapeHtml(data.message)}
     </p>
     ${data.metadata ? `
     <div style="background-color: #0a0a0a; border: 1px solid #262626; border-radius: 8px; padding: 16px; margin: 16px 0; font-family: monospace; font-size: 12px; color: #a3a3a3; white-space: pre-wrap;">
-${JSON.stringify(data.metadata, null, 2)}
+${escapeHtml(JSON.stringify(data.metadata, null, 2))}
     </div>` : ''}
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: data.subject,
+    preheader: escapeHtml(data.subject),
     badge: 'SYSTEM ALERT',
     badgeColor: 'red',
-    title: data.title,
+    title: escapeHtml(data.title),
     bodyHtml,
-    buttonText: data.actionText || 'VIEW ADMIN PANEL',
-    buttonUrl: data.actionUrl || `${baseUrl}/admin`,
+    buttonText: escapeHtml(data.actionText || 'VIEW ADMIN PANEL'),
+    // actionUrl is usually a site path (e.g. /admin/orders/<id>); email clients need an absolute link.
+    buttonUrl: data.actionUrl?.startsWith('/') ? `${baseUrl}${data.actionUrl}` : data.actionUrl || `${baseUrl}/admin`,
     showSocials: false,
     footerNotice: 'Automated administrative system alert for CLAPCULTURE.',
   });
@@ -1066,8 +1115,9 @@ export async function sendPasswordResetEmail(
   env: AppwriteEnv | undefined,
   data: PasswordResetData
 ): Promise<MailResult> {
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const resetUrl = data.resetLink || `${baseUrl}/admin/login?resetCode=${data.resetCode}`;
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
+  const resetUrl = data.resetLink || `${baseUrl}/admin/login?resetCode=${encodeURIComponent(data.resetCode)}`;
+  const resetCode = escapeHtml(data.resetCode);
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">
@@ -1079,14 +1129,14 @@ export async function sendPasswordResetEmail(
         PASSWORD RESET CODE
       </span>
       <div style="font-size: 36px; font-weight: 900; color: #d2f000; font-family: monospace; letter-spacing: 0.2em; margin: 10px 0;">
-        ${data.resetCode}
+        ${resetCode}
       </div>
       <div style="font-size: 11px; color: #737373; font-family: monospace;">Expires in 15 minutes</div>
     </div>
   `;
 
   const html = buildClapCultureEmailTemplate({
-    preheader: `Password Reset Code: ${data.resetCode} — CLAPCULTURE`,
+    preheader: `Password Reset Code: ${resetCode} — CLAPCULTURE`,
     badge: 'SECURITY RESET',
     badgeColor: 'amber',
     title: 'RESET YOUR PASSWORD',
@@ -1116,7 +1166,7 @@ export async function sendTestEmail(
   targetEmail?: string
 ): Promise<MailResult> {
   const recipient = targetEmail || env?.SMTP_USER || process.env.SMTP_USER || 'clapcultureofficial@gmail.com';
-  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const baseUrl = env?.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://clapculture.com';
 
   const bodyHtml = `
     <p style="margin: 0 0 16px 0;">

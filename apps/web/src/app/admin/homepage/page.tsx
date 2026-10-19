@@ -83,7 +83,22 @@ export default function HomepageCMSPage() {
   const { data, updateData, resetData } = useHomepageCMS();
   const { data: dbProducts } = useProducts();
 
-  const [formData, setFormData] = useState<HomepageCMSData>(() => JSON.parse(JSON.stringify(data)));
+  // `formBase.source` is the store snapshot the form was copied from; `formBase.copy` is that pristine copy
+  const [formBase, setFormBase] = useState<{ source: HomepageCMSData; copy: HomepageCMSData }>(() => ({
+    source: data,
+    copy: JSON.parse(JSON.stringify(data)),
+  }));
+  const [formData, setFormData] = useState<HomepageCMSData>(formBase.copy);
+  const isFormDirty = formData !== formBase.copy;
+  if (data !== formBase.source && !isFormDirty) {
+    // Store refreshed (e.g. server data arrived after mount) before any edits: re-copy so Save can't push stale content
+    const copy: HomepageCMSData = JSON.parse(JSON.stringify(data));
+    setFormBase({ source: data, copy });
+    setFormData(copy);
+  }
+  // Newer content was loaded while this form has unsaved edits
+  const hasNewerStoreData = isFormDirty && data !== formBase.source && data.lastUpdated !== formBase.source.lastUpdated;
+  const [isSaving, setIsSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<'all' | 'hero' | 'sections' | 'newsletter'>('all');
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     hero: true,
@@ -120,22 +135,48 @@ export default function HomepageCMSPage() {
 
   // Toast State
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastIsError, setToastIsError] = useState(false);
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, isError = false) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    setToastIsError(isError);
+    setTimeout(() => setToastMessage(null), isError ? 5000 : 3000);
   };
 
-  const handleSaveAll = () => {
-    updateData(formData);
-    showToast('✨ Homepage changes saved successfully! Storefront updated in real-time.');
+  const handleSaveAll = async () => {
+    if (isSaving) return;
+    if (
+      hasNewerStoreData &&
+      !confirm('The homepage was updated after you started editing. Saving will overwrite those newer changes with this form. Continue?')
+    ) {
+      return;
+    }
+    setIsSaving(true);
+    const submitted = formData;
+    const result = await updateData(submitted);
+    setIsSaving(false);
+    if (result.ok) {
+      setFormBase({ source: result.data, copy: submitted });
+      showToast('✨ Homepage changes saved successfully! Storefront updated in real-time.');
+    } else {
+      showToast(`Homepage NOT saved: ${result.error}`, true);
+    }
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
+    if (isSaving) return;
     if (confirm('Are you sure you want to reset the homepage to the original curated default configuration? Any custom card banners will be restored.')) {
-      resetData();
-      setFormData(JSON.parse(JSON.stringify(DEFAULT_HOMEPAGE_CMS)));
-      showToast('🔄 Homepage reset to default configuration.');
+      setIsSaving(true);
+      const result = await resetData();
+      setIsSaving(false);
+      if (result.ok) {
+        const copy: HomepageCMSData = JSON.parse(JSON.stringify(DEFAULT_HOMEPAGE_CMS));
+        setFormBase({ source: result.data, copy });
+        setFormData(copy);
+        showToast('🔄 Homepage reset to default configuration.');
+      } else {
+        showToast(`Homepage NOT reset: ${result.error}`, true);
+      }
     }
   };
 
@@ -383,8 +424,8 @@ export default function HomepageCMSPage() {
     <div className="min-h-screen bg-[#0a0a0a] text-white p-4 md:p-8 font-sans pb-32">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-8 right-8 z-100 bg-[#141414] border-2 border-[#d2f000] text-white px-5 py-3.5 rounded-xl shadow-2xl flex items-center gap-3 animate-in fade-in slide-in-from-bottom-5">
-          <span className="material-symbols-outlined text-[#d2f000]">check_circle</span>
+        <div className={`fixed bottom-8 right-8 z-100 bg-[#141414] border-2 ${toastIsError ? 'border-red-500' : 'border-[#d2f000]'} text-white px-5 py-3.5 rounded-xl shadow-2xl flex items-center gap-3 animate-in fade-in slide-in-from-bottom-5`}>
+          <span className={`material-symbols-outlined ${toastIsError ? 'text-red-400' : 'text-[#d2f000]'}`}>{toastIsError ? 'error' : 'check_circle'}</span>
           <span className="text-sm font-medium">{toastMessage}</span>
         </div>
       )}
@@ -415,7 +456,8 @@ export default function HomepageCMSPage() {
 
           <button
             onClick={handleReset}
-            className="border border-red-500/30 hover:border-red-500 text-red-400 hover:text-red-300 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 bg-red-950/20"
+            disabled={isSaving}
+            className="disabled:opacity-50 border border-red-500/30 hover:border-red-500 text-red-400 hover:text-red-300 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 bg-red-950/20"
             title="Reset to default curated configuration"
           >
             <span className="material-symbols-outlined text-[18px]">restart_alt</span>
@@ -432,10 +474,11 @@ export default function HomepageCMSPage() {
 
           <button
             onClick={handleSaveAll}
-            className="bg-[#d2f000] text-black hover:bg-[#b8d400] font-bold px-6 py-2.5 rounded-lg text-sm transition-all shadow-lg shadow-[#d2f000]/20 flex items-center gap-2 cursor-pointer active:scale-95"
+            disabled={isSaving}
+            className="bg-[#d2f000] text-black hover:bg-[#b8d400] font-bold px-6 py-2.5 rounded-lg text-sm transition-all shadow-lg shadow-[#d2f000]/20 flex items-center gap-2 cursor-pointer active:scale-95 disabled:opacity-60 disabled:cursor-wait"
           >
             <span className="material-symbols-outlined text-[20px]">save</span>
-            Save Changes
+            {isSaving ? 'Saving...' : 'Save Changes'}
           </button>
         </div>
       </div>
@@ -1320,7 +1363,7 @@ export default function HomepageCMSPage() {
                 <span className="text-xs font-mono text-[#a3a3a3] mb-2 self-start uppercase">Live Card Preview</span>
                 <div className="w-full relative aspect-4/5 bg-black rounded-xl overflow-hidden border border-[#333] flex flex-col justify-between p-5 shadow-2xl">
                   <img
-                    src={editingTile.tile.imageUrl || '6a7fa922002c9b023447'}
+                    src={resolveImageUrl(editingTile.tile.imageUrl || '6a7fa922002c9b023447')}
                     alt="Preview"
                     className="absolute inset-0 w-full h-full object-cover opacity-70"
                   />

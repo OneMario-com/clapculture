@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
 import { formatCurrency } from '@/lib/utils';
+import { adminFetch } from '@/lib/admin-fetch';
 
 interface OrderDoc {
   $id: string;
@@ -23,10 +24,7 @@ export default function DashboardPage() {
     async function loadDashboardData() {
       try {
         setLoading(true);
-        const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-        const res = await fetch('/api/orders?limit=100', {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const res = await adminFetch('/api/orders?limit=100');
 
         if (res.ok) {
           const json = await res.json();
@@ -77,6 +75,7 @@ export default function DashboardPage() {
 
     return {
       id: String(doc.orderId || doc.$id).replace('#', ''),
+      docId: doc.$id,
       customer: customerName,
       status: doc.orderStatus || 'PLACED',
       payment: doc.paymentStatus || 'SUBMITTED',
@@ -176,7 +175,7 @@ export default function DashboardPage() {
                 >
                   <div>
                     <Link
-                      href={`/admin/orders/${order.id}`}
+                      href={`/admin/orders/${encodeURIComponent(order.docId || order.id)}`}
                       className="text-white font-bold font-mono text-sm hover:text-electric-lime block"
                     >
                       #{order.id}

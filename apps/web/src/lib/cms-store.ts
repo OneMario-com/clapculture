@@ -1,7 +1,7 @@
 'use client';
 
 import { useSyncExternalStore } from 'react';
-import { getBootstrapHomepage, subscribeToBootstrap } from './use-api-data';
+import { getBootstrapHomepage, setBootstrapHomepage, subscribeToBootstrap } from './use-api-data';
 
 export type AspectRatioType = 'portrait' | 'tall' | 'square' | 'landscape' | 'banner' | 'wide';
 
@@ -445,53 +445,61 @@ export function getHomepageCMS(): HomepageCMSData {
   }
 }
 
-export function saveHomepageCMS(data: HomepageCMSData): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const payload = {
-      ...data,
-      lastUpdated: new Date().toISOString()
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    window.dispatchEvent(new Event('homepage-cms-updated'));
+export type HomepageCMSSaveResult =
+  | { ok: true; data: HomepageCMSData }
+  | { ok: false; error: string };
 
-    // Persist to Appwrite Database via API
+// PUT the homepage config to the API; the local copy is only updated once the server accepted it.
+async function persistHomepageCMS(payload: HomepageCMSData): Promise<HomepageCMSSaveResult> {
+  if (typeof window === 'undefined') return { ok: false, error: 'Not available on the server' };
+  try {
     const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-    fetch('/api/homepage', {
+    const res = await fetch('/api/homepage', {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify(payload),
-    }).catch((err) => console.log('Database homepage save notice:', err));
-  } catch (e) {
-    console.error('Failed to save Homepage CMS to localStorage', e);
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.success) {
+      return { ok: false, error: json?.error || `Save failed (HTTP ${res.status})` };
+    }
+  } catch (err) {
+    console.error('Database homepage save failed:', err);
+    return { ok: false, error: 'Network error while saving homepage' };
   }
+
+  currentCMSData = payload;
+  lastSavedAt = Date.parse(payload.lastUpdated) || Date.now();
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.error('Failed to cache Homepage CMS in localStorage', e);
+  }
+  // The cached bootstrap still holds the previous homepage; replace it so it can't be re-applied
+  setBootstrapHomepage(payload as unknown as Record<string, unknown>);
+  window.dispatchEvent(new Event('homepage-cms-updated'));
+  return { ok: true, data: payload };
 }
 
-export function resetHomepageCMS(): HomepageCMSData {
-  if (typeof window === 'undefined') return DEFAULT_HOMEPAGE_CMS;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_HOMEPAGE_CMS));
-    window.dispatchEvent(new Event('homepage-cms-updated'));
+export function saveHomepageCMS(data: HomepageCMSData): Promise<HomepageCMSSaveResult> {
+  return persistHomepageCMS({
+    ...data,
+    lastUpdated: new Date().toISOString()
+  });
+}
 
-    const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-    fetch('/api/homepage', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(DEFAULT_HOMEPAGE_CMS),
-    }).catch(() => {});
-  } catch (e) {
-    console.error('Failed to reset Homepage CMS', e);
-  }
-  return DEFAULT_HOMEPAGE_CMS;
+export function resetHomepageCMS(): Promise<HomepageCMSSaveResult> {
+  // Stamped like any save so the reset copy counts as the newest one
+  return saveHomepageCMS(DEFAULT_HOMEPAGE_CMS);
 }
 
 let currentCMSData: HomepageCMSData = DEFAULT_HOMEPAGE_CMS;
+// lastUpdated (ms) of the copy this tab last saved; older bootstrap copies (e.g. from a CDN-cached
+// /api/bootstrap) must not replace it
+let lastSavedAt = 0;
 if (typeof window !== 'undefined') {
   currentCMSData = getHomepageCMS();
 }
@@ -509,6 +517,7 @@ function subscribeCMS(callback: () => void) {
   const updateFromBootstrap = () => {
     const bootstrapHomepage = getBootstrapHomepage();
     if (bootstrapHomepage && (bootstrapHomepage as Record<string, unknown>).sections) {
+      if (lastSavedAt && (Date.parse(String(bootstrapHomepage.lastUpdated || '')) || 0) < lastSavedAt) return;
       currentCMSData = bootstrapHomepage as unknown as HomepageCMSData;
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(bootstrapHomepage));
@@ -544,13 +553,8 @@ export function useHomepageCMS() {
   return {
     data,
     isLoaded,
-    updateData: (newData: HomepageCMSData) => {
-      currentCMSData = newData;
-      saveHomepageCMS(newData);
-    },
-    resetData: () => {
-      const reset = resetHomepageCMS();
-      currentCMSData = reset;
-    }
+    // Resolve with the server result so callers only report success when the save really persisted
+    updateData: (newData: HomepageCMSData) => saveHomepageCMS(newData),
+    resetData: () => resetHomepageCMS(),
   };
 }

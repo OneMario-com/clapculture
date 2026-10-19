@@ -2,24 +2,27 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { formatCurrency, resolveImageUrl } from '@/lib/utils';
 import { useCart } from '@/components/cart/CartProvider';
-import { useOrderStore, OrderData } from '@/lib/store';
+import { useOrderStore, OrderData, useIsClient } from '@/lib/store';
 
 import { compressImageFile } from '@/lib/image-compression';
 
 export default function PaymentClient({ orderId }: { orderId: string }) {
   const router = useRouter();
   const { clearCart } = useCart();
-  const { currentOrder, getOrder, updatePaymentInfo, checkoutInfo } = useOrderStore();
-  
+  const { getOrder, completeOrder } = useOrderStore();
+  const isClient = useIsClient();
+
   const cleanOrderId = (orderId || '').replace('#', '').trim();
   const formattedOrderId = cleanOrderId.startsWith('CLAP') ? cleanOrderId : `CLAP${cleanOrderId}`;
 
-  // 1. Initialize from memory or localStorage
-  const [order, setOrder] = useState<OrderData | null>(() => {
-    const memoryOrder = getOrder(cleanOrderId) || currentOrder;
+  // The order isn't in the database until payment is submitted, so this page
+  // only ever shows this checkout's own draft — never another order's data.
+  const [order] = useState<OrderData | null>(() => {
+    const memoryOrder = getOrder(cleanOrderId);
     if (memoryOrder) return memoryOrder;
     if (typeof window !== 'undefined') {
       try {
@@ -30,46 +33,7 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
     return null;
   });
 
-  // 2. Fetch live confirmed order from database (with contact verification)
-  React.useEffect(() => {
-    let isMounted = true;
-    async function syncOrderFromDB() {
-      try {
-        // Pass contact info for user-scoped access
-        const contact = order?.customer?.email || checkoutInfo?.email || '';
-        const url = contact
-          ? `/api/orders/${cleanOrderId}?contact=${encodeURIComponent(contact)}`
-          : `/api/orders/${cleanOrderId}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const json = await res.json();
-          if (json.success && json.data && isMounted) {
-            const doc = json.data;
-            let parsedCustomer = doc.customer;
-            if (typeof doc.customer === 'string') {
-              try { parsedCustomer = JSON.parse(doc.customer); } catch {}
-            }
-            let parsedItems = doc.items;
-            if (typeof doc.items === 'string') {
-              try { parsedItems = JSON.parse(doc.items); } catch {}
-            }
-            setOrder({
-              ...doc,
-              customer: parsedCustomer,
-              items: parsedItems,
-              total: Number(doc.total) || 1099,
-            });
-          }
-        }
-      } catch (err) {
-        console.error('Failed to sync order from DB:', err);
-      }
-    }
-    syncOrderFromDB();
-    return () => { isMounted = false; };
-  }, [cleanOrderId, order?.customer?.email, checkoutInfo?.email]);
-
-  const total = Number(order?.total) || 1099;
+  const total = Number(order?.total) || 0;
 
   const [screenshotUrl, setScreenshotUrl] = useState('');
   const [screenshotFile, setScreenshotFile] = useState<File | null>(null);
@@ -127,41 +91,47 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
 
     setIsSubmitting(true);
 
+    if (!order) return;
+
     // 1. Upload compressed payment screenshot to Appwrite Storage media bucket
     let uploadedScreenshotUrl = '';
-    if (screenshotFile) {
-      try {
-        const optimizedFile = await compressImageFile(screenshotFile, { maxWidth: 1400, quality: 0.82 });
-        const formData = new FormData();
-        formData.append('file', optimizedFile);
-        const uploadRes = await fetch('/api/payments/upload-proof', {
-          method: 'POST',
-          body: formData,
-        });
-        const uploadData = await uploadRes.json();
-        if (uploadData.success && uploadData.data?.url) {
-          uploadedScreenshotUrl = uploadData.data.url;
-        } else if (uploadData.success && uploadData.data?.fileId) {
-          uploadedScreenshotUrl = uploadData.data.fileId;
-        }
-      } catch (err) {
-        console.error('Error uploading payment screenshot to storage:', err);
+    try {
+      const optimizedFile = await compressImageFile(screenshotFile as File, { maxWidth: 1400, quality: 0.82 });
+      const formData = new FormData();
+      formData.append('file', optimizedFile);
+      const uploadRes = await fetch('/api/payments/upload-proof', {
+        method: 'POST',
+        body: formData,
+      });
+      const uploadData = await uploadRes.json();
+      if (uploadData.success && uploadData.data?.url) {
+        uploadedScreenshotUrl = uploadData.data.url;
+      } else if (uploadData.success && uploadData.data?.fileId) {
+        uploadedScreenshotUrl = uploadData.data.fileId;
+      } else {
+        setErrors((prev) => ({ ...prev, screenshot: uploadData.error || 'Screenshot upload failed. Please try again.' }));
       }
+    } catch (err) {
+      console.error('Error uploading payment screenshot to storage:', err);
+      setErrors((prev) => ({ ...prev, screenshot: 'Screenshot upload failed. Please check your connection and try again.' }));
+    }
+    if (!uploadedScreenshotUrl) {
+      setIsSubmitting(false);
+      return;
     }
 
-    // 2. Submit payment and register official order in database
+    // 2. Submit payment and register official order in database.
+    // The server re-prices the items from the catalog and assigns the final order number.
+    let savedOrder: Record<string, unknown>;
     try {
       const orderPayload = {
         orderId: formattedOrderId,
-        customer: order?.customer || checkoutInfo,
-        items: order?.items || [],
-        subtotal: order?.subtotal || total,
-        shipping: order?.shipping || 0,
-        total: order?.total || total,
-        paymentStatus: 'SUBMITTED',
-        orderStatus: 'PLACED',
+        customer: order.customer,
+        items: order.items,
+        total: order.total,
+        discountCode: order.discountCode || undefined,
         transactionId: utrNumber.trim(),
-        screenshotUrl: uploadedScreenshotUrl || undefined,
+        screenshotUrl: uploadedScreenshotUrl,
       };
 
       const res = await fetch('/api/orders', {
@@ -171,11 +141,12 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
       });
 
       const resJson = await res.json();
-      if (!res.ok || !resJson.success) {
+      if (!res.ok || !resJson.success || !resJson.data?.orderId) {
         setErrors((prev) => ({ ...prev, utr: resJson.error || 'Failed to submit payment. Please verify your UTR.' }));
         setIsSubmitting(false);
         return;
       }
+      savedOrder = resJson.data;
     } catch (err) {
       console.error('Error submitting order to database:', err);
       setErrors((prev) => ({ ...prev, utr: 'Network error. Please try submitting again.' }));
@@ -183,17 +154,60 @@ export default function PaymentClient({ orderId }: { orderId: string }) {
       return;
     }
 
-    if (order) {
-      updatePaymentInfo(utrNumber.trim(), uploadedScreenshotUrl || screenshotUrl || '');
-    }
+    const finalOrderId = String(savedOrder.orderId).replace('#', '');
+    completeOrder(cleanOrderId, {
+      orderId: finalOrderId,
+      transactionId: utrNumber.trim(),
+      screenshotUrl: uploadedScreenshotUrl,
+      paymentStatus: 'SUBMITTED',
+      subtotal: Number(savedOrder.subtotal) || order.subtotal,
+      shipping: Number(savedOrder.shipping) || 0,
+      total: Number(savedOrder.total) || order.total,
+    });
+    try {
+      localStorage.removeItem(`cc_order_${cleanOrderId}`);
+    } catch {}
 
     clearCart();
-
-    setTimeout(() => {
-      setIsSubmitting(false);
-      router.push(`/order-success/${formattedOrderId}`);
-    }, 300);
+    router.push(`/order-success/${finalOrderId}`);
   };
+
+  // The draft lives in browser storage, so render nothing order-specific until
+  // hydration is done (the server can't know it and the markup must match).
+  if (!isClient) {
+    return (
+      <div className="bg-deep-black min-h-screen flex items-center justify-center pt-24">
+        <div className="w-8 h-8 border-2 border-electric-lime border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!order) {
+    return (
+      <div className="bg-deep-black min-h-screen text-white pt-24 pb-16 px-4 flex flex-col items-center justify-center text-center">
+        <span className="material-symbols-outlined text-6xl text-gray-600 mb-4">receipt_long</span>
+        <h1 className="text-2xl font-headline-md mb-2 uppercase">Checkout session not found</h1>
+        <p className="text-gray-400 text-sm max-w-md mb-6">
+          We couldn&apos;t find the details for order #{cleanOrderId} on this device. If you already paid, track your order instead; otherwise start checkout again from your cart.
+        </p>
+        <div className="flex gap-3">
+          <Link href="/cart" className="bg-electric-lime text-black px-6 py-3 font-bold font-label-caps hover:bg-white transition-colors">BACK TO CART</Link>
+          <Link href="/track-order" className="border border-white px-6 py-3 font-bold font-label-caps hover:bg-white hover:text-black transition-colors">TRACK ORDER</Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (order.paymentStatus && order.paymentStatus !== 'PENDING') {
+    return (
+      <div className="bg-deep-black min-h-screen text-white pt-24 pb-16 px-4 flex flex-col items-center justify-center text-center">
+        <span className="material-symbols-outlined text-6xl text-electric-lime mb-4">check_circle</span>
+        <h1 className="text-2xl font-headline-md mb-2 uppercase">Payment already submitted</h1>
+        <p className="text-gray-400 text-sm max-w-md mb-6">Payment details for order #{cleanOrderId} have already been submitted.</p>
+        <Link href={`/order/${cleanOrderId}`} className="bg-electric-lime text-black px-6 py-3 font-bold font-label-caps hover:bg-white transition-colors">VIEW ORDER</Link>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-deep-black min-h-screen text-white pt-24 pb-16 px-4 md:px-8">

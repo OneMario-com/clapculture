@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 import { resolveImageUrl } from '@/lib/utils';
 import { compressImageFile } from '@/lib/image-compression';
 import { BadgeTagSelector } from '@/components/admin/BadgeTagSelector';
+import { adminFetch } from '@/lib/admin-fetch';
 
 function slugify(text: string): string {
   return text
@@ -66,7 +67,7 @@ export default function EditProductClient({ productId }: { productId: string }) 
   const loadProduct = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/products/${productId}?includeHidden=true`);
+      const res = await adminFetch(`/api/products/${productId}?includeHidden=true`);
       if (!res.ok) {
         showNotification('Failed to fetch product details from database', true);
         return;
@@ -177,7 +178,7 @@ export default function EditProductClient({ productId }: { productId: string }) 
 
     checkTimeoutRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(
+        const res = await adminFetch(
           `/api/products/check/slug?slug=${encodeURIComponent(formData.slug)}&excludeId=${encodeURIComponent(productId)}`
         );
         const json = await res.json();
@@ -234,7 +235,6 @@ export default function EditProductClient({ productId }: { productId: string }) 
     if (!files || files.length === 0) return;
 
     setIsUploading(true);
-    const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
 
     try {
       const uploadPromises = Array.from(files).map(async (file) => {
@@ -242,11 +242,8 @@ export default function EditProductClient({ productId }: { productId: string }) 
         const optimizedFile = await compressImageFile(file, { maxWidth: 1800, maxHeight: 1800, quality: 0.84 });
         const uploadFormData = new FormData();
         uploadFormData.append('file', optimizedFile);
-        const res = await fetch('/api/media/upload', {
+        const res = await adminFetch('/api/media/upload', {
           method: 'POST',
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
           body: uploadFormData,
         });
         const data = await res.json();
@@ -292,7 +289,6 @@ export default function EditProductClient({ productId }: { productId: string }) 
 
     setIsSaving(true);
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
       const selectedSizes = sizesList.filter(s => s.active).map(s => s.name);
       const totalStock = sizesList.filter(s => s.active).reduce((sum, s) => sum + s.stock, 0);
 
@@ -321,12 +317,9 @@ export default function EditProductClient({ productId }: { productId: string }) 
         images: formData.images.length > 0 ? formData.images : ['/stock/superstar-mockup1.webp'],
       };
 
-      const res = await fetch(`/api/products/${productId}`, {
+      const res = await adminFetch(`/api/products/${productId}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
@@ -347,11 +340,7 @@ export default function EditProductClient({ productId }: { productId: string }) 
   const handleDelete = async () => {
     setShowDeleteModal(false);
     try {
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
-      const res = await fetch(`/api/products/${productId}`, {
-        method: 'DELETE',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
+      const res = await adminFetch(`/api/products/${productId}`, { method: 'DELETE' });
       const json = await res.json();
       if (res.ok && json.success) {
         showNotification('Product deleted from database');

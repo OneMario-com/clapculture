@@ -1,10 +1,31 @@
-import { Hono } from 'hono';
-import { ID, Query } from 'node-appwrite';
+import { Hono, Context } from 'hono';
 import { getAppwriteClient } from '../lib/appwrite';
-import { getDbId, getEnv, getNextSequentialOrderId } from '../lib/utils';
-import { adminAuth } from '../middleware/auth';
-import { verifyAdminToken } from '../lib/jwt';
+import { getDbId, getEnv, getClientIp, runInBackground } from '../lib/utils';
+import { adminAuth, getAdminFromRequest } from '../middleware/auth';
+import { invalidate } from '../lib/cache';
+import { isRateLimited } from '../lib/redis';
+import {
+  OrderDoc,
+  reserveOrderId,
+  createOrderDocument,
+  findOrderCandidates,
+  findOrderCandidatesCached,
+  listOrdersCached,
+  contactMatchesOrder,
+  parseJsonObject,
+  sanitizeCustomer,
+  priceOrderItems,
+  isNotFoundError,
+} from '../lib/orders';
 import { upsertCustomerAndUser } from './customers';
+import { calculateDiscount } from '@clapculture/shared';
+import {
+  normalizeCode,
+  getDiscountByCode,
+  discountUnavailableReason,
+  toDiscountRule,
+  incrementDiscountUsage,
+} from '../lib/discounts';
 import {
   sendOrderConfirmationEmail,
   sendPaymentVerifiedEmail,
@@ -15,313 +36,229 @@ import {
 
 const orders = new Hono();
 
-// Get the next sequential order ID (e.g. #CLAP01001)
+const PAYMENT_STATUSES = ['PENDING', 'SUBMITTED', 'VERIFIED', 'REJECTED'];
+const ORDER_STATUSES = ['PLACED', 'CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+const UNAVAILABLE_MESSAGE = 'Our order system is temporarily unavailable. Please try again in a minute.';
+
+// Reserve the next order number (e.g. CLAP01005) for a checkout.
 orders.get('/next-id', async (c) => {
   try {
-    const { databases } = getAppwriteClient(getEnv(c));
-    const dbId = getDbId(c);
-    const orderId = await getNextSequentialOrderId(databases, dbId);
+    if (await isRateLimited(`next-id:${getClientIp(c)}`, 30, 10 * 60)) {
+      return c.json({ success: false, error: 'Too many checkout attempts. Please wait a few minutes.' }, 429);
+    }
+    const orderId = await reserveOrderId(c);
+    c.header('Cache-Control', 'no-store');
     return c.json({ success: true, data: { orderId } });
-  } catch {
-    return c.json({ success: true, data: { orderId: '#CLAP01001' } });
+  } catch (error: unknown) {
+    // Never hand out a hard-coded fallback number: every shopper would get the same one.
+    console.error('Order number reservation failed:', error);
+    return c.json({ success: false, error: UNAVAILABLE_MESSAGE }, 503);
   }
 });
 
-// Create or update an order
+// Create an order.
 // RULE: Customer orders are strictly created ONLY once payment details (12-digit UTR + screenshot) are submitted!
+// A storefront submission can only ever create a new order — never modify an existing one.
 orders.post('/', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const env = getEnv(c);
+  const { databases } = getAppwriteClient(env);
+  const dbId = getDbId(c);
+
+  if (await getAdminFromRequest(c)) {
+    return createOrUpdateOrderAsAdmin(c, body);
+  }
+
+  if (await isRateLimited(`order-submit:${getClientIp(c)}`, 10, 10 * 60)) {
+    return c.json({ success: false, error: 'Too many order attempts. Please wait a few minutes and try again.' }, 429);
+  }
+
+  // ── STRICT VALIDATION: Storefront orders require valid payment details ──
+  const transactionId = String(body.transactionId || '').replace(/\D/g, '');
+  if (transactionId.length !== 12) {
+    return c.json({ success: false, error: 'A valid 12-digit UTR / Reference number is required to place an order.' }, 400);
+  }
+
+  const screenshotUrl = String(body.screenshotUrl || '').trim();
+  if (!isOwnStorageReference(screenshotUrl, env.APPWRITE_ENDPOINT)) {
+    return c.json({ success: false, error: 'Payment screenshot is required to complete order placement.' }, 400);
+  }
+
+  const customer = sanitizeCustomer(body.customer);
+  if (!customer.fullName || !customer.email || !customer.phone || !customer.address) {
+    return c.json({ success: false, error: 'Name, email, phone and address are required.' }, 400);
+  }
+
+  let priced;
   try {
-    const body = await c.req.json();
-    const env = getEnv(c);
-    const { databases } = getAppwriteClient(env);
-    const dbId = getDbId(c);
-    const isAdmin = isAdminRequest(c);
-    
-    let customOrderId = (body.orderId || '').replace('#', '').trim();
-    let existingDocId: string | null = null;
+    priced = await priceOrderItems(typeof body.items === 'string' ? JSON.parse(body.items) : body.items);
+  } catch (e) {
+    return c.json({ success: false, error: (e as Error).message || 'Invalid cart items.' }, 400);
+  }
 
-    if (customOrderId) {
-      // Check if this order exists
-      const existing = await databases.listDocuments(dbId, 'orders', [
-        Query.equal('orderId', customOrderId),
-        Query.limit(1),
-      ]);
-      if (existing.documents.length > 0) {
-        existingDocId = existing.documents[0].$id;
+  const itemsStr = JSON.stringify(priced.items);
+  if (itemsStr.length > 10000) {
+    return c.json({ success: false, error: 'Too many items for a single order. Please split it into two orders.' }, 400);
+  }
+
+  const priceWarnings: string[] = [];
+  if (priced.unverifiedItems.length > 0) {
+    priceWarnings.push(`Price not verified (product no longer in catalog): ${priced.unverifiedItems.join(', ')}.`);
+  }
+
+  // Discount codes are re-checked here; the checkout page's word for it is not trusted.
+  const requestedCode = normalizeCode(body.discountCode);
+  let discount: { code: string; amount: number; id: string } | null = null;
+  if (requestedCode) {
+    try {
+      const discountDoc = await getDiscountByCode(requestedCode);
+      const unavailable = discountUnavailableReason(discountDoc);
+      const result = discountDoc && !unavailable
+        ? calculateDiscount(toDiscountRule(discountDoc), priced.subtotal, priced.shipping)
+        : null;
+      if (discountDoc && result?.eligible) {
+        discount = { code: requestedCode, amount: result.amount, id: discountDoc.$id };
+      } else {
+        priceWarnings.push(`Discount ${requestedCode} was NOT applied (${unavailable || result?.reason || 'not valid'}).`);
       }
+    } catch {
+      priceWarnings.push(`Discount ${requestedCode} could not be checked and was NOT applied.`);
     }
+  }
+  const total = priced.total - (discount?.amount || 0);
 
-    if (!customOrderId) {
-      const nextId = await getNextSequentialOrderId(databases, dbId);
-      customOrderId = nextId.replace('#', '').trim();
-    }
+  const clientTotal = Number(body.total);
+  if (Number.isFinite(clientTotal) && Math.abs(clientTotal - total) > 0.5) {
+    priceWarnings.push(`Checkout page showed ₹${clientTotal} but the order total is ₹${total} — check the amount actually paid.`);
+  }
 
-    const customerObj = typeof body.customer === 'string' ? JSON.parse(body.customer) : (body.customer || {});
-    if (body.screenshotUrl) customerObj.screenshotUrl = body.screenshotUrl;
-    if (body.paymentProof) customerObj.paymentProof = body.paymentProof;
-    const customerStr = JSON.stringify(customerObj);
-    const itemsStr = typeof body.items === 'string' ? body.items : JSON.stringify(body.items || []);
+  const orderData: Record<string, unknown> = {
+    // `customer` is the order's free-form JSON column, so payment proof and the
+    // applied discount are recorded alongside the customer's details.
+    customer: JSON.stringify({
+      ...customer,
+      screenshotUrl,
+      paymentProof: screenshotUrl,
+      ...(discount ? { discountCode: discount.code, discountAmount: discount.amount } : {}),
+    }),
+    items: itemsStr,
+    subtotal: priced.subtotal,
+    shipping: priced.shipping,
+    total,
+    paymentStatus: 'SUBMITTED',
+    orderStatus: 'PLACED',
+    transactionId,
+    trackingNumber: 'TRK-CLAP-PENDING',
+    isArchived: false,
+  };
 
-    // ── STRICT VALIDATION: Storefront orders require valid payment details ──
-    if (!isAdmin) {
-      if (body.paymentStatus === 'PENDING') {
-        return c.json({
-          success: false,
-          error: 'Orders are only registered after payment details (UTR and screenshot) are submitted.'
-        }, 400);
-      }
+  let result: { doc: OrderDoc; duplicate: boolean };
+  try {
+    result = await createOrderDocument(databases, dbId, orderData, body.orderId);
+  } catch (error) {
+    console.error('Order creation failed:', error);
+    // The customer has already paid: make sure the shop hears about it even if the database is down.
+    runInBackground(
+      sendAdminAlertEmail(env, {
+        subject: `ACTION NEEDED: order could not be saved (₹${total}, UTR ${transactionId})`,
+        title: 'ORDER NOT SAVED',
+        message: `A customer submitted payment details but the order could not be saved to the database: ${(error as Error).message}. Contact the customer and record the order manually.`,
+        metadata: {
+          customer: `${customer.fullName} (${customer.email}, ${customer.phone})`,
+          address: `${customer.address}, ${customer.city || ''}, ${customer.state || ''} ${customer.pincode || ''}`,
+          amount: `₹${total}${discount ? ` (discount ${discount.code} −₹${discount.amount})` : ''}`,
+          utr: transactionId,
+          screenshot: screenshotUrl,
+          items: priced.items.map((i) => `${i.name} (${i.size}) x${i.quantity}`).join('; '),
+        },
+      }),
+      'Unsaved order alert'
+    );
+    return c.json({
+      success: false,
+      error: 'We received your payment details but could not save your order right now. Please try again in a minute. If it keeps failing, WhatsApp us your UTR number.',
+    }, 503);
+  }
 
-      const cleanTxn = String(body.transactionId || '').replace(/\D/g, '');
-      if (!cleanTxn || cleanTxn.length < 12) {
-        return c.json({
-          success: false,
-          error: 'A valid 12-digit UTR / Reference number is required to place an order.'
-        }, 400);
-      }
+  const { doc, duplicate } = result;
+  const orderId = String(doc.orderId);
 
-      if (!body.screenshotUrl && !customerObj.screenshotUrl && !customerObj.paymentProof) {
-        return c.json({
-          success: false,
-          error: 'Payment screenshot is required to complete order placement.'
-        }, 400);
-      }
-    }
-
-    let transactionId = body.transactionId || 'UPI-REF-PENDING';
-    if (body.paymentStatus === 'SUBMITTED') {
-      const cleanTxn = String(body.transactionId || '').replace(/\D/g, '');
-      if (cleanTxn && cleanTxn.length >= 12) {
-        transactionId = cleanTxn;
-      }
-    }
-
-    const orderData: Record<string, unknown> = {
-      orderId: customOrderId,
-      customer: customerStr,
-      items: itemsStr,
-      subtotal: Number(body.subtotal) || Number(body.total) || 0,
-      shipping: Number(body.shipping) || 0,
-      total: Number(body.total) || 0,
-      paymentStatus: body.paymentStatus || 'SUBMITTED',
-      orderStatus: body.orderStatus || 'PLACED',
-      transactionId: transactionId,
-      trackingNumber: body.trackingNumber || 'TRK-CLAP-PENDING',
-      isArchived: body.isArchived !== undefined ? Boolean(body.isArchived) : false,
-    };
-    
-    let response;
-    if (existingDocId) {
-      // Update existing order without creating duplicate!
-      response = await databases.updateDocument(
-        dbId,
-        'orders',
-        existingDocId,
-        orderData
-      );
-    } else {
-      // Create new order
-      response = await databases.createDocument(
-        dbId,
-        'orders',
-        ID.unique(),
-        orderData
-      );
-    }
+  if (!duplicate) {
+    await invalidate('orders');
 
     // Auto-save/sync customer profile and Appwrite Auth user
-    if (customerObj.email) {
+    runInBackground(
       upsertCustomerAndUser(env, {
-        email: customerObj.email,
-        fullName: customerObj.fullName,
-        phone: customerObj.phone,
-        address: customerObj.address,
-        city: customerObj.city,
-        state: customerObj.state,
-        pincode: customerObj.pincode,
-        orderId: customOrderId,
+        email: customer.email,
+        fullName: customer.fullName,
+        phone: customer.phone,
+        address: customer.address,
+        city: customer.city,
+        state: customer.state,
+        pincode: customer.pincode,
+        orderId,
         source: 'order_checkout',
-      }).catch((e) => console.log('Customer upsert notice:', e.message));
-    }
-    const itemsList = typeof body.items === 'string' ? JSON.parse(body.items) : (body.items || []);
-    
-    if (customerObj.email && orderData.paymentStatus === 'SUBMITTED') {
-      sendOrderConfirmationEmail(env, {
-        toEmail: customerObj.email,
-        customerName: customerObj.fullName || 'Valued Rebel',
-        orderId: customOrderId.replace('#', ''),
-        totalAmount: Number(body.total) || 0,
-        items: itemsList,
-        paymentStatus: String(orderData.paymentStatus),
-        shippingAddress: `${customerObj.address || ''}, ${customerObj.city || ''}, ${customerObj.state || ''} ${customerObj.pincode || ''}`,
-      }).catch((e) => console.log('Email confirmation notice:', e.message));
-    }
-
-    if (orderData.paymentStatus === 'SUBMITTED') {
-      // Send Admin New Order Notification Email
-      sendAdminAlertEmail(env, {
-        subject: `New Order Placed #${customOrderId.replace('#', '')} (₹${body.total || 0})`,
-        title: `NEW ORDER #${customOrderId.replace('#', '')}`,
-        message: `A new order has been placed by ${customerObj.fullName || 'Customer'} for ₹${body.total || 0}.`,
-        actionUrl: `/admin/orders/${customOrderId.replace('#', '')}`,
-        actionText: 'VIEW ORDER IN ADMIN',
-        metadata: {
-          orderId: customOrderId,
-          customer: `${customerObj.fullName} (${customerObj.email}, ${customerObj.phone})`,
-          amount: `₹${body.total}`,
-          itemsCount: itemsList.length,
-        },
-      }).catch((e) => console.log('Admin email alert notice:', e.message));
-    }
-    
-    return c.json({ success: true, data: response }, existingDocId ? 200 : 201);
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Failed to create order';
-    return c.json({ success: false, error: msg }, 500);
-  }
-});
-
-// Update payment proof for an existing order
-orders.patch('/:orderId/payment', async (c) => {
-  try {
-    const rawId = c.req.param('orderId') || '';
-    const cleanId = rawId.replace('#', '').trim();
-    const body = await c.req.json();
-    const env = getEnv(c);
-    const { databases } = getAppwriteClient(env);
-    const dbId = getDbId(c);
-
-    // ── MANDATORY: UTR must be a valid 12-digit number ──
-    const cleanTxn = String(body.transactionId || '').replace(/\D/g, '');
-    if (!cleanTxn || cleanTxn.length < 12) {
-      return c.json({ success: false, error: 'A valid 12-digit UTR / Reference number is required.' }, 400);
-    }
-
-    // ── MANDATORY: Screenshot URL must be provided ──
-    if (!body.screenshotUrl) {
-      return c.json({ success: false, error: 'Payment screenshot is required. Please upload your payment confirmation screenshot.' }, 400);
-    }
-
-    // Find the order document
-    let existingDoc: Record<string, unknown> | null = null;
-    try {
-      existingDoc = await databases.getDocument(dbId, 'orders', cleanId);
-    } catch {}
-
-    if (!existingDoc) {
-      const variations = [cleanId, `CLAP${cleanId}`, cleanId.toUpperCase(), `#${cleanId}`];
-      for (const v of variations) {
-        const response = await databases.listDocuments(
-          dbId,
-          'orders',
-          [Query.equal('orderId', v), Query.limit(1)]
-        );
-        if (response.documents.length > 0) {
-          existingDoc = response.documents[0];
-          break;
-        }
-      }
-    }
-
-    if (!existingDoc) {
-      return c.json({ success: false, error: 'Order not found' }, 404);
-    }
-
-    let customerObj: Record<string, unknown> = {};
-    if (typeof existingDoc.customer === 'string') {
-      try { customerObj = JSON.parse(existingDoc.customer); } catch {}
-    } else if (existingDoc.customer && typeof existingDoc.customer === 'object') {
-      customerObj = { ...existingDoc.customer as Record<string, unknown> };
-    }
-
-    // If new customer details provided, merge them
-    if (body.customer) {
-      const newCustomer = typeof body.customer === 'string' ? JSON.parse(body.customer) : body.customer;
-      customerObj = { ...customerObj, ...newCustomer };
-    }
-
-    if (body.screenshotUrl) {
-      customerObj.screenshotUrl = body.screenshotUrl;
-      customerObj.paymentProof = body.screenshotUrl;
-    }
-
-    const updateData: Record<string, unknown> = {
-      paymentStatus: 'SUBMITTED',
-      orderStatus: 'PLACED',
-      customer: JSON.stringify(customerObj),
-      transactionId: cleanTxn,
-    };
-
-    const updatedDoc = await databases.updateDocument(
-      dbId,
-      'orders',
-      existingDoc.$id as string,
-      updateData
+      }),
+      'Customer upsert'
     );
 
-    // Send notifications
-    const itemsList = typeof existingDoc.items === 'string' ? JSON.parse(existingDoc.items) : (existingDoc.items || []);
-    if (customerObj.email) {
+    runInBackground(
       sendOrderConfirmationEmail(env, {
-        toEmail: String(customerObj.email),
-        customerName: String(customerObj.fullName || 'Valued Rebel'),
-        orderId: String(existingDoc.orderId).replace('#', ''),
-        totalAmount: Number(existingDoc.total) || 0,
-        items: itemsList,
+        toEmail: customer.email,
+        customerName: customer.fullName || 'Valued Rebel',
+        orderId,
+        totalAmount: total,
+        subtotal: priced.subtotal,
+        shippingFee: priced.shipping,
+        discountAmount: discount?.amount || 0,
+        items: priced.items,
         paymentStatus: 'SUBMITTED',
-        shippingAddress: `${customerObj.address || ''}, ${customerObj.city || ''}, ${customerObj.state || ''} ${customerObj.pincode || ''}`,
-      }).catch((e) => console.log('Email confirmation notice:', e.message));
+        shippingAddress: `${customer.address || ''}, ${customer.city || ''}, ${customer.state || ''} ${customer.pincode || ''}`,
+      }),
+      'Email confirmation'
+    );
+
+    if (discount) {
+      runInBackground(incrementDiscountUsage(discount.id), 'Discount usage count');
     }
 
-    sendAdminAlertEmail(env, {
-      subject: `Payment Submitted #${String(existingDoc.orderId).replace('#', '')} (₹${existingDoc.total || 0})`,
-      title: `PAYMENT SUBMITTED #${String(existingDoc.orderId).replace('#', '')}`,
-      message: `Customer ${customerObj.fullName || 'Customer'} has submitted UPI payment proof with UTR ${updateData.transactionId}.`,
-      actionUrl: `/admin/orders/${existingDoc.$id}`,
-      actionText: 'REVIEW & VERIFY PAYMENT',
-      metadata: {
-        orderId: String(existingDoc.orderId),
-        customer: `${customerObj.fullName} (${customerObj.email}, ${customerObj.phone})`,
-        amount: `₹${existingDoc.total}`,
-        utr: String(updateData.transactionId),
-      },
-    }).catch((e) => console.log('Admin email alert notice:', e.message));
-
-    return c.json({ success: true, data: updatedDoc });
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Failed to update payment proof';
-    return c.json({ success: false, error: msg }, 500);
+    runInBackground(
+      sendAdminAlertEmail(env, {
+        subject: `New Order Placed #${orderId} (₹${total})`,
+        title: `NEW ORDER #${orderId}`,
+        message: `A new order has been placed by ${customer.fullName || 'Customer'} for ₹${total}.${priceWarnings.length ? ` ⚠️ ${priceWarnings.join(' ')}` : ''}`,
+        actionUrl: `/admin/orders/${doc.$id}`,
+        actionText: 'VIEW ORDER IN ADMIN',
+        metadata: {
+          orderId,
+          customer: `${customer.fullName} (${customer.email}, ${customer.phone})`,
+          amount: `₹${total}${discount ? ` (discount ${discount.code} −₹${discount.amount})` : ''}`,
+          utr: transactionId,
+          itemsCount: priced.items.length,
+        },
+      }),
+      'Admin email alert'
+    );
   }
+
+  return c.json({ success: true, data: enrichOrderDoc(doc) }, duplicate ? 200 : 201);
 });
 
 // Single Order Archive Toggle
 orders.patch('/:orderId/archive', adminAuth, async (c) => {
   try {
-    const rawId = c.req.param('orderId') || '';
-    const cleanId = rawId.replace('#', '').trim();
     const body = await c.req.json().catch(() => ({}));
     const isArchived = body.isArchived !== undefined ? Boolean(body.isArchived) : true;
     const { databases } = getAppwriteClient(getEnv(c));
     const dbId = getDbId(c);
 
-    let targetDocId = cleanId;
-    try {
-      await databases.getDocument(dbId, 'orders', targetDocId);
-    } catch {
-      const list = await databases.listDocuments(dbId, 'orders', [
-        Query.equal('orderId', cleanId),
-        Query.limit(1)
-      ]);
-      if (list.documents.length > 0) {
-        targetDocId = list.documents[0].$id;
-      }
+    const target = await resolveOrderForAdmin(c, c.req.param('orderId') || '');
+    if (!target) {
+      return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    const response = await databases.updateDocument(
-      dbId,
-      'orders',
-      targetDocId,
-      { isArchived }
-    );
+    const response = await databases.updateDocument(dbId, 'orders', target.$id, { isArchived });
+    await invalidate('orders');
 
     return c.json({ success: true, data: enrichOrderDoc(response) });
   } catch (error: unknown) {
@@ -330,7 +267,7 @@ orders.patch('/:orderId/archive', adminAuth, async (c) => {
   }
 });
 
-// Bulk Order Archive / Unarchive
+// Bulk Order Archive / Unarchive (orderIds are Appwrite document $ids)
 orders.post('/bulk-archive', adminAuth, async (c) => {
   try {
     const { orderIds, isArchived } = await c.req.json();
@@ -343,85 +280,168 @@ orders.post('/bulk-archive', adminAuth, async (c) => {
 
     const results = await Promise.allSettled(
       orderIds.map(async (id: string) => {
-        const cleanId = id.replace('#', '').trim();
-        let targetDocId = cleanId;
+        const docId = String(id).replace(/#/g, '').trim();
         try {
-          await databases.getDocument(dbId, 'orders', targetDocId);
-        } catch {
-          const list = await databases.listDocuments(dbId, 'orders', [
-            Query.equal('orderId', cleanId),
-            Query.limit(1)
-          ]);
-          if (list.documents.length > 0) {
-            targetDocId = list.documents[0].$id;
-          }
+          return await databases.updateDocument(dbId, 'orders', docId, { isArchived: archiveFlag });
+        } catch (e) {
+          if (!isNotFoundError(e) && (e as { code?: number }).code !== 400) throw e;
+          // Not a document $id: resolve it as an order number.
+          const target = await resolveOrderForAdmin(c, docId);
+          if (!target) throw e;
+          return databases.updateDocument(dbId, 'orders', target.$id, { isArchived: archiveFlag });
         }
-        return databases.updateDocument(dbId, 'orders', targetDocId, { isArchived: archiveFlag });
       })
     );
+    await invalidate('orders');
 
+    const failed = results.filter((r) => r.status === 'rejected').length;
     return c.json({
-      success: true,
-      message: `Updated archive status for ${results.length} orders`,
+      success: failed === 0,
+      message: failed === 0
+        ? `Updated archive status for ${results.length} orders`
+        : `Updated ${results.length - failed} of ${results.length} orders; ${failed} failed`,
       isArchived: archiveFlag,
-    });
+    }, failed === 0 ? 200 : 207);
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Failed to bulk archive orders';
     return c.json({ success: false, error: msg }, 500);
   }
 });
 
+// Customer order tracking (kept for compatibility; same rules as GET /:orderId)
 orders.get('/track', async (c) => {
-  try {
-    const orderId = c.req.query('orderId');
-    const contact = c.req.query('contact');
-    
-    if (!orderId || !contact) {
-      return c.json({ success: false, error: 'Order ID and contact details required' }, 400);
+  return getOrderForCustomer(c, c.req.query('orderId') || '', c.req.query('contact') || '');
+});
+
+orders.get('/:orderId', async (c) => {
+  c.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  c.header('Pragma', 'no-cache');
+  c.header('Expires', '0');
+
+  const ref = c.req.param('orderId') || '';
+  if (await getAdminFromRequest(c)) {
+    try {
+      const order = await resolveOrderForAdmin(c, ref);
+      if (!order) return c.json({ success: false, error: 'Order not found' }, 404);
+      return c.json({ success: true, data: enrichOrderDoc(order) });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Failed to get order';
+      return c.json({ success: false, error: msg }, 500);
     }
-    
-    const { databases } = getAppwriteClient(getEnv(c));
+  }
+
+  return getOrderForCustomer(c, ref, c.req.query('contact') || '');
+});
+
+orders.put('/:id/status', adminAuth, async (c) => {
+  try {
+    const { orderStatus, paymentStatus, trackingNumber, isArchived } = await c.req.json();
+    const env = getEnv(c);
+    const { databases } = getAppwriteClient(env);
     const dbId = getDbId(c);
-    
-    const response = await databases.listDocuments(
-      dbId,
-      'orders',
-      [Query.equal('orderId', orderId.toUpperCase())]
-    );
-    
-    if (response.documents.length === 0) {
+
+    if (paymentStatus !== undefined && !PAYMENT_STATUSES.includes(paymentStatus)) {
+      return c.json({ success: false, error: `Invalid payment status: ${paymentStatus}` }, 400);
+    }
+    if (orderStatus !== undefined && !ORDER_STATUSES.includes(orderStatus)) {
+      return c.json({ success: false, error: `Invalid order status: ${orderStatus}` }, 400);
+    }
+
+    const previous = await resolveOrderForAdmin(c, c.req.param('id') || '');
+    if (!previous) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
-    
-    const order = response.documents[0] as Record<string, unknown>;
-    let customer: Record<string, string | undefined> = {};
-    if (typeof order.customer === 'string') {
-      try { customer = JSON.parse(order.customer); } catch {}
-    } else {
-      customer = (order.customer || {}) as Record<string, string | undefined>;
+
+    const updateData: Record<string, unknown> = {};
+    if (orderStatus) updateData.orderStatus = orderStatus;
+    if (paymentStatus) updateData.paymentStatus = paymentStatus;
+    if (trackingNumber !== undefined) updateData.trackingNumber = String(trackingNumber).slice(0, 255);
+    if (isArchived !== undefined) updateData.isArchived = Boolean(isArchived);
+
+    const response = await databases.updateDocument(dbId, 'orders', previous.$id, updateData);
+    await invalidate('orders');
+
+    // Email the customer only when a status actually changes, so re-saving an
+    // order (e.g. to edit the tracking number) doesn't re-send old notifications.
+    const customerObj = parseJsonObject(response.customer);
+    const customerEmail = customerObj.email as string;
+    const customerName = (customerObj.fullName || 'Valued Rebel') as string;
+    const orderLabel = String(response.orderId).replace('#', '');
+    const becamePaymentStatus = (s: string) => response.paymentStatus === s && previous.paymentStatus !== s;
+    const becameOrderStatus = (s: string) => response.orderStatus === s && previous.orderStatus !== s;
+
+    if (customerEmail && becamePaymentStatus('VERIFIED')) {
+      runInBackground(sendPaymentVerifiedEmail(env, {
+        toEmail: customerEmail,
+        customerName,
+        orderId: orderLabel,
+        amount: Number(response.total) || 0,
+        transactionId: (response.transactionId || '') as string,
+      }), 'Payment verified email');
     }
-    
-    if (customer.email !== contact && customer.phone !== contact) {
-      return c.json({ success: false, error: 'Contact details do not match order' }, 403);
+
+    if (customerEmail && becameOrderStatus('SHIPPED')) {
+      runInBackground(sendShippingUpdateEmail(env, {
+        toEmail: customerEmail,
+        customerName,
+        orderId: orderLabel,
+        trackingNumber: (response.trackingNumber || 'TRK-CLAP-PENDING') as string,
+        courierName: 'BlueDart / Delhivery Express',
+      }), 'Shipping update email');
     }
-    
-    return c.json({ success: true, data: enrichOrderDoc(order) });
+
+    if (customerEmail && becameOrderStatus('DELIVERED')) {
+      runInBackground(sendOrderDeliveredEmail(env, {
+        toEmail: customerEmail,
+        customerName,
+        orderId: orderLabel,
+      }), 'Delivered email');
+    }
+
+    return c.json({ success: true, data: enrichOrderDoc(response) });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Failed to track order';
+    const msg = error instanceof Error ? error.message : 'Failed to update order status';
     return c.json({ success: false, error: msg }, 500);
   }
 });
 
-function enrichOrderDoc(doc: Record<string, unknown>) {
-  let customerObj: Record<string, unknown> = {};
-  if (typeof doc.customer === 'string') {
-    try {
-      customerObj = JSON.parse(doc.customer);
-    } catch {}
-  } else if (doc.customer && typeof doc.customer === 'object') {
-    customerObj = doc.customer as Record<string, unknown>;
-  }
+orders.get('/', adminAuth, async (c) => {
+  try {
+    const status = c.req.query('status');
+    const paymentStatus = c.req.query('paymentStatus');
+    const archived = c.req.query('archived'); // 'true', 'false', 'all'
+    const includePending = c.req.query('includePending') === 'true';
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '250', 10) || 250, 1), 250);
 
+    // All admin pages share one cached list (cleared on every order write).
+    let filteredDocs = await listOrdersCached(c);
+    if (status) filteredDocs = filteredDocs.filter((d) => d.orderStatus === status);
+    if (paymentStatus) filteredDocs = filteredDocs.filter((d) => d.paymentStatus === paymentStatus);
+
+    // Archive Filtering
+    if (archived === 'true') {
+      filteredDocs = filteredDocs.filter((d) => Boolean(d.isArchived) === true);
+    } else if (archived !== 'all') {
+      filteredDocs = filteredDocs.filter((d) => Boolean(d.isArchived) !== true);
+    }
+
+    // By default, exclude PENDING (unpaid) orders from admin views
+    if (!includePending && !paymentStatus) {
+      filteredDocs = filteredDocs.filter((d) => d.paymentStatus !== 'PENDING');
+    }
+
+    c.header('Cache-Control', 'private, no-store');
+    return c.json({ success: true, data: filteredDocs.slice(0, limit).map((d) => enrichOrderDoc(d)) });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Failed to list orders';
+    return c.json({ success: false, error: msg }, 500);
+  }
+});
+
+// ─── Helpers ─────────────────────────────────────────────────────────
+
+function enrichOrderDoc(doc: Record<string, unknown>) {
+  const customerObj = parseJsonObject(doc.customer);
   const screenshot = (customerObj.screenshotUrl || customerObj.paymentProof || doc.screenshotUrl || doc.paymentProof || '') as string;
   return {
     ...doc,
@@ -432,215 +452,86 @@ function enrichOrderDoc(doc: Record<string, unknown>) {
 }
 
 /**
- * Helper to check if the request has a valid admin JWT token.
+ * Resolve an admin reference ($id or order number) to one order, read fresh
+ * from the database. Old data may hold several orders with the same number;
+ * the newest is returned, which is why admin pages should link by $id.
  */
-function isAdminRequest(c: { req: { header: (name: string) => string | undefined } }): boolean {
-  const authHeader = c.req.header('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
-  const token = authHeader.split(' ')[1];
-  const payload = verifyAdminToken(token);
-  return payload !== null;
+async function resolveOrderForAdmin(c: Context, ref: string): Promise<OrderDoc | null> {
+  const { databases } = getAppwriteClient(getEnv(c));
+  const candidates = await findOrderCandidates(databases, getDbId(c), ref);
+  return candidates[0] || null;
 }
 
-orders.get('/:orderId', async (c) => {
+/**
+ * Customer view of an order: requires the email or phone number used for the
+ * order, so knowing (or guessing) an order number is not enough to see someone
+ * else's name, address and items.
+ */
+async function getOrderForCustomer(c: Context, ref: string, contact: string) {
   try {
-    c.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-    c.header('Pragma', 'no-cache');
-    c.header('Expires', '0');
-
-    const rawId = c.req.param('orderId') || '';
-    const cleanId = rawId.replace('#', '').trim();
-    const { databases } = getAppwriteClient(getEnv(c));
-    const dbId = getDbId(c);
-    
-    // Find the order document
-    let orderDoc: Record<string, unknown> | null = null;
-
-    // 1. Try finding by document ID
-    try {
-      const doc = await databases.getDocument(dbId, 'orders', cleanId);
-      if (doc) orderDoc = doc;
-    } catch {}
-
-    // 2. Try querying by orderId (case-insensitive variations)
-    if (!orderDoc) {
-      const variations = [cleanId, `CLAP${cleanId}`, cleanId.toUpperCase(), `#${cleanId}`];
-      for (const v of variations) {
-        const response = await databases.listDocuments(
-          dbId,
-          'orders',
-          [Query.equal('orderId', v), Query.limit(1)]
-        );
-        if (response.documents.length > 0) {
-          orderDoc = response.documents[0];
-          break;
-        }
-      }
+    if (!ref || !contact.trim()) {
+      return c.json({ success: false, error: 'Enter the order number and the email or phone number used for the order.' }, 400);
+    }
+    if (await isRateLimited(`order-lookup:${getClientIp(c)}`, 30, 10 * 60)) {
+      return c.json({ success: false, error: 'Too many lookups. Please wait a few minutes and try again.' }, 429);
     }
 
-    if (!orderDoc) {
+    const candidates = await findOrderCandidatesCached(c, ref);
+    if (candidates.length === 0) {
       return c.json({ success: false, error: 'Order not found' }, 404);
     }
 
-    // ── CONTACT VERIFICATION: Prevent cross-user data leakage ──
-    // Admin requests (with valid JWT) bypass this check
-    if (!isAdminRequest(c)) {
-      const contact = c.req.query('contact');
-      if (contact) {
-        // Verify the contact matches the order's customer
-        let customerObj: Record<string, string | undefined> = {};
-        if (typeof orderDoc.customer === 'string') {
-          try { customerObj = JSON.parse(orderDoc.customer); } catch {}
-        } else if (orderDoc.customer && typeof orderDoc.customer === 'object') {
-          customerObj = orderDoc.customer as Record<string, string | undefined>;
-        }
-
-        const contactLower = contact.toLowerCase().trim();
-        const emailMatch = customerObj.email && customerObj.email.toLowerCase().trim() === contactLower;
-        const phoneMatch = customerObj.phone && customerObj.phone.replace(/\s/g, '').includes(contactLower.replace(/\s/g, ''));
-
-        if (!emailMatch && !phoneMatch) {
-          return c.json({ success: false, error: 'You do not have permission to view this order.' }, 403);
-        }
-      }
+    const order = candidates.find((doc) => contactMatchesOrder(doc, contact));
+    if (!order) {
+      return c.json({ success: false, error: 'The email or phone number does not match this order.' }, 403);
     }
-    
-    return c.json({ success: true, data: enrichOrderDoc(orderDoc) });
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Failed to get order';
-    return c.json({ success: false, error: msg }, 500);
-  }
-});
 
-orders.put('/:id/status', adminAuth, async (c) => {
+    return c.json({ success: true, data: enrichOrderDoc(order) });
+  } catch (error: unknown) {
+    console.error('Order lookup failed:', error);
+    return c.json({ success: false, error: UNAVAILABLE_MESSAGE }, 503);
+  }
+}
+
+/** Admin-only manual order creation/update (not used by the storefront). */
+async function createOrUpdateOrderAsAdmin(c: Context, body: Record<string, unknown>) {
   try {
-    const idOrOrderId = (c.req.param('id') || '').replace('#', '').trim();
-    const { orderStatus, paymentStatus, trackingNumber, isArchived } = await c.req.json();
     const env = getEnv(c);
     const { databases } = getAppwriteClient(env);
     const dbId = getDbId(c);
-    
-    let targetDocId = idOrOrderId;
 
-    // Resolve real document ID if orderId was passed
-    try {
-      await databases.getDocument(dbId, 'orders', targetDocId);
-    } catch {
-      const variations = [idOrOrderId, `CLAP${idOrOrderId}`, idOrOrderId.toUpperCase(), `#${idOrOrderId}`];
-      for (const v of variations) {
-        const list = await databases.listDocuments(dbId, 'orders', [
-          Query.equal('orderId', v),
-          Query.limit(1)
-        ]);
-        if (list.documents.length > 0) {
-          targetDocId = list.documents[0].$id;
-          break;
-        }
-      }
-    }
-    
-    const updateData: Record<string, unknown> = {};
-    if (orderStatus) updateData.orderStatus = orderStatus;
-    if (paymentStatus) updateData.paymentStatus = paymentStatus;
-    if (trackingNumber !== undefined) updateData.trackingNumber = trackingNumber;
-    if (isArchived !== undefined) updateData.isArchived = Boolean(isArchived);
-    
-    const response = await databases.updateDocument(
-      dbId,
-      'orders',
-      targetDocId,
-      updateData
-    );
+    const orderData: Record<string, unknown> = {
+      customer: typeof body.customer === 'string' ? body.customer : JSON.stringify(body.customer || {}),
+      items: typeof body.items === 'string' ? body.items : JSON.stringify(body.items || []),
+      subtotal: Number(body.subtotal) || Number(body.total) || 0,
+      shipping: Number(body.shipping) || 0,
+      total: Number(body.total) || 0,
+      paymentStatus: PAYMENT_STATUSES.includes(String(body.paymentStatus)) ? body.paymentStatus : 'SUBMITTED',
+      orderStatus: ORDER_STATUSES.includes(String(body.orderStatus)) ? body.orderStatus : 'PLACED',
+      transactionId: String(body.transactionId || 'UPI-REF-PENDING'),
+      trackingNumber: String(body.trackingNumber || 'TRK-CLAP-PENDING'),
+      isArchived: Boolean(body.isArchived),
+    };
 
-    // Send emails based on status change
-    let customerObj: Record<string, unknown> = {};
-    if (typeof response.customer === 'string') {
-      try { customerObj = JSON.parse(response.customer); } catch {}
-    } else if (response.customer && typeof response.customer === 'object') {
-      customerObj = response.customer as Record<string, unknown>;
-    }
-    const customerEmail = customerObj.email as string;
-    const customerName = (customerObj.fullName || 'Valued Rebel') as string;
-    const itemsList = typeof response.items === 'string' ? JSON.parse(response.items) : (response.items || []);
+    const existing = body.orderId ? await resolveOrderForAdmin(c, String(body.orderId)) : null;
+    const doc = existing
+      ? await databases.updateDocument(dbId, 'orders', existing.$id, orderData)
+      : (await createOrderDocument(databases, dbId, orderData, body.orderId)).doc;
+    await invalidate('orders');
 
-    if (customerEmail && paymentStatus === 'VERIFIED') {
-      sendPaymentVerifiedEmail(env, {
-        toEmail: customerEmail,
-        customerName,
-        orderId: String(response.orderId).replace('#', ''),
-        amount: Number(response.total) || 0,
-        transactionId: (response.transactionId || '') as string,
-      }).catch((e) => console.log('Payment verified email notice:', e.message));
-    }
-
-    if (customerEmail && orderStatus === 'SHIPPED') {
-      sendShippingUpdateEmail(env, {
-        toEmail: customerEmail,
-        customerName,
-        orderId: String(response.orderId).replace('#', ''),
-        trackingNumber: (response.trackingNumber || 'TRK-CLAP-PENDING') as string,
-        courierName: 'BlueDart / Delhivery Express',
-      }).catch((e) => console.log('Shipping update email notice:', e.message));
-    }
-
-    if (customerEmail && orderStatus === 'DELIVERED') {
-      sendOrderDeliveredEmail(env, {
-        toEmail: customerEmail,
-        customerName,
-        orderId: String(response.orderId).replace('#', ''),
-      }).catch((e) => console.log('Delivered email notice:', e.message));
-    }
-    
-    return c.json({ success: true, data: enrichOrderDoc(response) });
+    return c.json({ success: true, data: enrichOrderDoc(doc) }, existing ? 200 : 201);
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Failed to update order status';
+    const msg = error instanceof Error ? error.message : 'Failed to save order';
     return c.json({ success: false, error: msg }, 500);
   }
-});
+}
 
-orders.get('/', adminAuth, async (c) => {
-  try {
-    const { databases } = getAppwriteClient(getEnv(c));
-    const dbId = getDbId(c);
-    const status = c.req.query('status');
-    const paymentStatus = c.req.query('paymentStatus');
-    const archived = c.req.query('archived'); // 'true', 'false', 'all'
-    const includePending = c.req.query('includePending') === 'true';
-    const limit = parseInt(c.req.query('limit') || '250');
-    
-    const queries = [Query.limit(limit), Query.orderDesc('$createdAt')];
-    if (status) queries.push(Query.equal('orderStatus', status));
-    if (paymentStatus) queries.push(Query.equal('paymentStatus', paymentStatus));
-    
-    const response = await databases.listDocuments(
-      dbId,
-      'orders',
-      queries
-    );
-
-    let filteredDocs = response.documents;
-
-    // Archive Filtering
-    if (archived === 'true') {
-      filteredDocs = filteredDocs.filter((d) => Boolean(d.isArchived) === true);
-    } else if (archived === 'false' || !archived) {
-      if (archived !== 'all') {
-        filteredDocs = filteredDocs.filter((d) => Boolean(d.isArchived) !== true);
-      }
-    }
-
-    // By default, exclude PENDING (unpaid) orders from admin views
-    if (!includePending && !paymentStatus) {
-      filteredDocs = filteredDocs.filter(
-        (d) => (d as Record<string, unknown>).paymentStatus !== 'PENDING'
-      );
-    }
-    
-    return c.json({ success: true, data: filteredDocs.map((d) => enrichOrderDoc(d)) });
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Failed to list orders';
-    return c.json({ success: false, error: msg }, 500);
-  }
-});
+/** Only accept screenshot references to files in our own Appwrite storage. */
+function isOwnStorageReference(value: string, endpoint?: string): boolean {
+  if (!value || value.length > 2000) return false;
+  if (/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,35}$/.test(value)) return true; // bare file id
+  const base = (endpoint || process.env.APPWRITE_ENDPOINT || 'https://sgp.cloud.appwrite.io/v1').replace(/\/+$/, '');
+  return value.startsWith(`${base}/storage/buckets/`);
+}
 
 export default orders;

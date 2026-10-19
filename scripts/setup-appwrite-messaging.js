@@ -38,7 +38,7 @@ const SMTP_CONFIG = {
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
   port: parseInt(process.env.SMTP_PORT || '465', 10),
   username: process.env.SMTP_USER || 'clapculture.co@gmail.com',
-  password: (process.env.SMTP_PASS || 'bjrlqlfpyazdnjjg').replace(/\s+/g, ''),
+  password: (process.env.SMTP_PASS || '').replace(/\s+/g, ''),
   encryption: 'ssl', // 'ssl' for 465, 'tls' for 587
   autoTLS: true,
   mailer: 'smtps',

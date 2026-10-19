@@ -7,6 +7,7 @@ import { resolveImageUrl } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 import { BadgeTagSelector } from '@/components/admin/BadgeTagSelector';
 import { compressImageFile } from '@/lib/image-compression';
+import { adminFetch } from '@/lib/admin-fetch';
 
 function slugify(text: string): string {
   return text
@@ -77,7 +78,7 @@ export default function AddProductPage() {
 
     checkTimeoutRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/products/check/slug?slug=${encodeURIComponent(slug)}`);
+        const res = await adminFetch(`/api/products/check/slug?slug=${encodeURIComponent(slug)}`);
         const json = await res.json();
         if (json.success) {
           if (json.available) {
@@ -138,18 +139,14 @@ export default function AddProductPage() {
     if (!files || files.length === 0) return;
 
     setIsUploading(true);
-    const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
 
     try {
       const uploadPromises = Array.from(files).map(async (file) => {
         const optimizedFile = await compressImageFile(file, { maxWidth: 1800, maxHeight: 1800, quality: 0.84 });
         const formData = new FormData();
         formData.append('file', optimizedFile);
-        const res = await fetch('/api/media/upload', {
+        const res = await adminFetch('/api/media/upload', {
           method: 'POST',
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
           body: formData,
         });
         const data = await res.json();
@@ -215,7 +212,6 @@ export default function AddProductPage() {
         }
       });
 
-      const token = localStorage.getItem('adminToken') || localStorage.getItem('token');
       const payload = {
         name,
         slug,
@@ -234,12 +230,9 @@ export default function AddProductPage() {
         images: images,
       };
 
-      const res = await fetch('/api/products', {
+      const res = await adminFetch('/api/products', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 

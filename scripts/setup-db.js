@@ -77,6 +77,11 @@ const COLLECTIONS = [
       { key: 'badges', type: 'string_array', size: 50, required: false },
       { key: 'categoryId', type: 'string', size: 255, required: true },
       { key: 'createdAt', type: 'string', size: 255, required: false },
+      { key: 'sizeStock', type: 'string', size: 2000, required: false },
+      { key: 'isActive', type: 'boolean', required: false },
+      { key: 'freeShipping', type: 'boolean', required: false },
+      { key: 'deliveryChargeEnabled', type: 'boolean', required: false },
+      { key: 'deliveryFee', type: 'double', required: false },
     ],
   },
   {
@@ -113,9 +118,8 @@ const COLLECTIONS = [
       { key: 'paymentStatus', type: 'string', size: 50, required: true },
       { key: 'orderStatus', type: 'string', size: 50, required: true },
       { key: 'transactionId', type: 'string', size: 255, required: false },
-      { key: 'screenshotUrl', type: 'string', size: 2000, required: false },
       { key: 'trackingNumber', type: 'string', size: 255, required: false },
-      { key: 'createdAt', type: 'string', size: 255, required: true },
+      { key: 'isArchived', type: 'boolean', required: false },
     ],
   },
   {
@@ -180,12 +184,8 @@ async function ensureCollections() {
           DATABASE_ID,
           col.id,
           col.name,
-          [
-            Permission.read(Role.any()),
-            Permission.create(Role.any()),
-            Permission.update(Role.any()),
-            Permission.delete(Role.any()),
-          ]
+          // No public permissions: the site only accesses data through its server API key.
+          []
         );
         console.log(`✅ Collection "${col.name}" created.`);
       } else {
@@ -221,12 +221,8 @@ async function ensureStorageBucket() {
       await storage.createBucket(
         bucketId,
         'ClapCulture Media Storage',
-        [
-          Permission.read(Role.any()),
-          Permission.create(Role.any()),
-          Permission.update(Role.any()),
-          Permission.delete(Role.any()),
-        ],
+        // Public read only (images). Uploads and deletes go through the server API key.
+        [Permission.read(Role.any())],
         false,
         true,
         50000000,

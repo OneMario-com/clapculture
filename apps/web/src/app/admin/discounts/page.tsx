@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { adminFetch } from '@/lib/admin-fetch';
 
 type DiscountType = 'Percentage' | 'Flat' | 'Free Shipping';
 
@@ -16,6 +17,25 @@ interface Discount {
   isActive: boolean;
 }
 
+// The live `discounts` collection stores the on/off flag as `active`
+function mapDiscount(d: Record<string, unknown>): Discount {
+  return {
+    id: String(d.$id || d.id || ''),
+    code: String(d.code || ''),
+    type: (d.type as DiscountType) || 'Percentage',
+    value: Number(d.value) || 0,
+    minOrder: Number(d.minOrder) || 0,
+    expiry: String(d.expiry || ''),
+    usageCount: Number(d.usageCount) || 0,
+    usageLimit: d.usageLimit ? Number(d.usageLimit) : null,
+    isActive: d.active !== false,
+  };
+}
+
+async function readJson(res: Response): Promise<{ success?: boolean; data?: unknown; error?: string } | null> {
+  return res.json().catch(() => null);
+}
+
 export default function DiscountsPage() {
   const [discounts, setDiscounts] = useState<Discount[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,39 +43,26 @@ export default function DiscountsPage() {
   
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingDiscount, setEditingDiscount] = useState<Discount | null>(null);
+  const [saving, setSaving] = useState(false);
   
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [discountToDelete, setDiscountToDelete] = useState<string | null>(null);
 
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
 
-  const showToast = (message: string) => {
-    setToast(message);
+  const showToast = (msg: string, isError = false) => {
+    setToast({ msg, isError });
     setTimeout(() => setToast(null), 3000);
   };
 
   const loadDiscounts = useCallback(async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem('adminToken');
-      const res = await fetch('/api/discounts', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
+      const res = await adminFetch('/api/discounts');
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
-          const mapped: Discount[] = data.data.map((d: Record<string, unknown>) => ({
-            id: String(d.$id || d.id || ''),
-            code: String(d.code || ''),
-            type: (d.type as DiscountType) || 'Percentage',
-            value: Number(d.value) || 0,
-            minOrder: Number(d.minOrder) || 0,
-            expiry: String(d.expiry || ''),
-            usageCount: Number(d.usageCount) || 0,
-            usageLimit: d.usageLimit ? Number(d.usageLimit) : null,
-            isActive: d.active !== false && d.isActive !== false,
-          }));
-          setDiscounts(mapped);
+          setDiscounts(data.data.map((d: Record<string, unknown>) => mapDiscount(d)));
         }
       }
     } catch {
@@ -66,7 +73,8 @@ export default function DiscountsPage() {
   }, []);
 
   useEffect(() => {
-    loadDiscounts();
+    const timer = setTimeout(() => loadDiscounts(), 0);
+    return () => clearTimeout(timer);
   }, [loadDiscounts]);
 
   const filteredDiscounts = discounts.filter(d => d.code.toLowerCase().includes(search.toLowerCase()));
@@ -75,35 +83,44 @@ export default function DiscountsPage() {
     const target = discounts.find(d => d.id === id);
     if (!target) return;
     const nextActive = !target.isActive;
-    setDiscounts(discounts.map(d => d.id === id ? { ...d, isActive: nextActive } : d));
+    const setActive = (active: boolean) =>
+      setDiscounts(prev => prev.map(d => d.id === id ? { ...d, isActive: active } : d));
+    setActive(nextActive);
 
-    const token = localStorage.getItem('adminToken');
-    fetch(`/api/discounts/${id}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ active: nextActive, isActive: nextActive }),
-    }).catch(() => {});
+    try {
+      const res = await adminFetch(`/api/discounts/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: nextActive }),
+      });
+      const json = await readJson(res);
+      if (!res.ok || !json?.success) {
+        setActive(target.isActive);
+        showToast(json?.error || 'Failed to update discount status', true);
+      }
+    } catch {
+      setActive(target.isActive);
+      showToast('Failed to update discount status', true);
+    }
   };
 
   const handleDelete = async () => {
     if (discountToDelete) {
       const id = discountToDelete;
-      setDiscounts(discounts.filter(d => d.id !== id));
       setIsDeleteModalOpen(false);
       setDiscountToDelete(null);
 
-      const token = localStorage.getItem('adminToken');
       try {
-        await fetch(`/api/discounts/${id}`, {
-          method: 'DELETE',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        showToast('Discount deleted successfully');
+        const res = await adminFetch(`/api/discounts/${id}`, { method: 'DELETE' });
+        const json = await readJson(res);
+        if (res.ok && json?.success) {
+          setDiscounts(prev => prev.filter(d => d.id !== id));
+          showToast('Discount deleted successfully');
+        } else {
+          showToast(json?.error || 'Failed to delete discount', true);
+        }
       } catch {
-        showToast('Failed to delete discount');
+        showToast('Failed to delete discount', true);
       }
     }
   };
@@ -115,6 +132,7 @@ export default function DiscountsPage() {
 
   const handleSaveDiscount = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (saving) return;
     const formData = new FormData(e.currentTarget);
     const payload = {
       code: (formData.get('code') as string || '').toUpperCase(),
@@ -124,43 +142,41 @@ export default function DiscountsPage() {
       expiry: formData.get('expiry') as string,
       usageLimit: formData.get('usageLimit') ? Number(formData.get('usageLimit')) : null,
       active: formData.get('isActive') === 'on',
-      isActive: formData.get('isActive') === 'on',
     };
 
-    const token = localStorage.getItem('adminToken');
-    const headers = {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    };
-
+    const editing = editingDiscount;
+    setSaving(true);
     try {
-      if (editingDiscount) {
-        const res = await fetch(`/api/discounts/${editingDiscount.id}`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) {
-          showToast('Discount updated successfully');
-          loadDiscounts();
-        }
-      } else {
-        const res = await fetch('/api/discounts', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) {
-          showToast('Discount created successfully');
-          loadDiscounts();
-        }
+      const res = await adminFetch(editing ? `/api/discounts/${editing.id}` : '/api/discounts', {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await readJson(res);
+      if (!res.ok || !json?.success) {
+        // Keep the modal open so the admin can fix the input and retry
+        showToast(json?.error || `Failed to save discount (HTTP ${res.status})`, true);
+        return;
       }
+
+      const saved = json.data && typeof json.data === 'object'
+        ? mapDiscount(json.data as Record<string, unknown>)
+        : null;
+      if (saved?.id) {
+        setDiscounts(prev => editing
+          ? prev.map(d => d.id === editing.id ? saved : d)
+          : [saved, ...prev]);
+      } else {
+        loadDiscounts();
+      }
+      showToast(editing ? 'Discount updated successfully' : 'Discount created successfully');
+      setIsModalOpen(false);
+      setEditingDiscount(null);
     } catch {
-      showToast('Error saving discount');
+      showToast('Error saving discount', true);
+    } finally {
+      setSaving(false);
     }
-    
-    setIsModalOpen(false);
-    setEditingDiscount(null);
   };
 
   return (
@@ -382,9 +398,10 @@ export default function DiscountsPage() {
                 </button>
                 <button 
                   type="submit"
-                  className="bg-[#d2f000] text-black font-medium px-4 py-2 rounded-lg hover:bg-[#b8d400]"
+                  disabled={saving}
+                  className="bg-[#d2f000] text-black font-medium px-4 py-2 rounded-lg hover:bg-[#b8d400] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Save Discount
+                  {saving ? 'Saving...' : 'Save Discount'}
                 </button>
               </div>
             </form>
@@ -420,8 +437,10 @@ export default function DiscountsPage() {
       {/* Toast */}
       {toast && (
         <div className="fixed bottom-4 right-4 bg-[#1a1a1a] border border-[#262626] text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in z-50">
-          <span className="material-symbols-outlined text-green-500 text-[20px]">check_circle</span>
-          <span className="text-sm font-medium">{toast}</span>
+          <span className={`material-symbols-outlined text-[20px] ${toast.isError ? 'text-red-500' : 'text-green-500'}`}>
+            {toast.isError ? 'error' : 'check_circle'}
+          </span>
+          <span className="text-sm font-medium">{toast.msg}</span>
         </div>
       )}
     </div>

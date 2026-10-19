@@ -25,18 +25,31 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const isLoginPage = pathname === '/admin/login';
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isCheckingAuth, setIsCheckingAuth] = useState(!isLoginPage);
+  const [prevIsLoginPage, setPrevIsLoginPage] = useState(isLoginPage);
 
-  // Strict session verification for all admin pages
+  // Re-arm the session check when moving between the login page and the admin shell
+  if (prevIsLoginPage !== isLoginPage) {
+    setPrevIsLoginPage(isLoginPage);
+    setIsCheckingAuth(!isLoginPage);
+  }
+
+  // Strict session verification: once per mount and again after login (not on every navigation)
   useEffect(() => {
     if (isLoginPage) {
       return;
     }
 
+    let cancelled = false;
     const token = localStorage.getItem('adminToken');
     if (!token) {
       router.push('/admin/login');
       return;
     }
+
+    const rejectSession = () => {
+      localStorage.removeItem('adminToken');
+      router.push('/admin/login');
+    };
 
     // Validate token with backend /api/admin/me
     fetch('/api/admin/me', {
@@ -44,34 +57,33 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         Authorization: `Bearer ${token}`,
       },
     })
-      .then((res) => {
-        if (!res.ok) throw new Error('Session invalid');
-        return res.json();
-      })
-      .then((data) => {
-        if (data.success) {
+      .then(async (res) => {
+        if (cancelled) return;
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (res.ok && data?.success) {
           // Authenticated successfully
+          setIsCheckingAuth(false);
+        } else if (res.status === 401 || res.status === 403 || res.ok) {
+          // Invalid / expired session
+          rejectSession();
         } else {
-          localStorage.removeItem('adminToken');
+          // Server error: never trust the token without a successful check
           router.push('/admin/login');
         }
       })
       .catch(() => {
-        // Fallback for client demo session
-        if (token === 'admin-secret-token-demo' || token.length > 20) {
-          // Fallback accepted
-        } else {
-          localStorage.removeItem('adminToken');
-          router.push('/admin/login');
-        }
-      })
-      .finally(() => {
-        setIsCheckingAuth(false);
+        // Network failure: the session could not be verified, so send the admin back to login
+        if (!cancelled) router.push('/admin/login');
       });
-  }, [pathname, router, isLoginPage]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router, isLoginPage]);
 
   // If on login page, don't show the dashboard shell
-  if (pathname === '/admin/login') {
+  if (isLoginPage) {
     return <>{children}</>;
   }
 

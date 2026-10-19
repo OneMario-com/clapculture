@@ -99,7 +99,7 @@ export function Footer() {
 
         <div className="flex flex-col-reverse md:flex-row items-center justify-between pt-6 md:pt-8 border-t border-charcoal gap-6 text-center md:text-left">
           <div className="text-gray-500 text-[10px] md:text-xs 2xl:text-sm">
-            &copy; {new Date().getFullYear()} CLAPCULTURE. All rights reserved. &bull; Designed &amp; Developed by <a href="https://vcard.stemlen.com/u/surendra" target="_blank" rel="noopener noreferrer" className="text-electric-lime hover:underline font-bold">surendra.codes</a>
+            &copy; {new Date().getFullYear()} CLAPCULTURE. All rights reserved. &bull; Designed &amp; Developed by <a href="https://onemario.com" target="_blank" rel="noopener noreferrer" className="text-electric-lime hover:underline font-bold">One Mario</a>
           </div>
 
           <div className="flex flex-col sm:flex-row items-center gap-3 md:gap-4">

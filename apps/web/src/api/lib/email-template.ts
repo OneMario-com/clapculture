@@ -1,3 +1,10 @@
+import { escapeHtml } from './utils';
+
+/**
+ * `customerName` is plain text and is escaped here. Button URLs are escaped as
+ * attribute values. Every other field is inserted as HTML, so callers must
+ * escape any user-supplied text they interpolate into it.
+ */
 export interface EmailTemplateOptions {
   preheader?: string;
   badge?: string;
@@ -134,7 +141,7 @@ export function buildClapCultureEmailTemplate(options: EmailTemplateOptions): st
             <td class="mobile-padding" style="padding: 36px 36px 20px 36px;">
               ${customerName ? `
               <div style="font-size: 13px; font-weight: 700; color: #a3a3a3; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 8px;">
-                HELLO ${customerName.toUpperCase()},
+                HELLO ${escapeHtml(customerName.toUpperCase())},
               </div>` : ''}
 
               <h1 class="headline" style="font-size: 28px; font-weight: 900; color: #ffffff; text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 8px 0; line-height: 1.2; font-family: 'Arial Black', -apple-system, sans-serif;">
@@ -159,14 +166,14 @@ export function buildClapCultureEmailTemplate(options: EmailTemplateOptions): st
               <table border="0" cellpadding="0" cellspacing="0">
                 <tr>
                   <td align="center" style="border-radius: 4px; background-color: #d2f000;">
-                    <a href="${buttonUrl}" target="_blank" class="button-stack" style="font-size: 13px; font-weight: 900; font-family: -apple-system, sans-serif; color: #090909; text-decoration: none; border-radius: 4px; padding: 14px 32px; border: 1px solid #d2f000; display: inline-block; text-transform: uppercase; letter-spacing: 0.12em;">
+                    <a href="${escapeHtml(buttonUrl)}" target="_blank" class="button-stack" style="font-size: 13px; font-weight: 900; font-family: -apple-system, sans-serif; color: #090909; text-decoration: none; border-radius: 4px; padding: 14px 32px; border: 1px solid #d2f000; display: inline-block; text-transform: uppercase; letter-spacing: 0.12em;">
                       ${buttonText} &rarr;
                     </a>
                   </td>
                   ${(secondaryButtonText && secondaryButtonUrl) ? `
                   <td style="width: 12px;"></td>
                   <td align="center" style="border-radius: 4px; background-color: transparent;">
-                    <a href="${secondaryButtonUrl}" target="_blank" class="button-stack" style="font-size: 13px; font-weight: 800; font-family: -apple-system, sans-serif; color: #ffffff; text-decoration: none; border-radius: 4px; padding: 14px 24px; border: 1px solid #404040; display: inline-block; text-transform: uppercase; letter-spacing: 0.1em;">
+                    <a href="${escapeHtml(secondaryButtonUrl)}" target="_blank" class="button-stack" style="font-size: 13px; font-weight: 800; font-family: -apple-system, sans-serif; color: #ffffff; text-decoration: none; border-radius: 4px; padding: 14px 24px; border: 1px solid #404040; display: inline-block; text-transform: uppercase; letter-spacing: 0.1em;">
                       ${secondaryButtonText}
                     </a>
                   </td>` : ''}
@@ -215,7 +222,7 @@ export function buildClapCultureEmailTemplate(options: EmailTemplateOptions): st
                 <tr>
                   <td align="center" style="font-size: 11px; color: #525252; letter-spacing: 0.05em;">
                     &copy; ${new Date().getFullYear()} CLAPCULTURE. ALL RIGHTS RESERVED. <br/>
-                    DESIGN & DEVELOPED BY <a href="https://vcard.stemlen.com/u/surendra" target="_blank" style="color: #d2f000; font-weight: 700; text-decoration: none;">SURENDRA.CODES</a>
+                    DESIGN & DEVELOPED BY <a href="https://onemario.com" target="_blank" style="color: #d2f000; font-weight: 700; text-decoration: none;">ONE MARIO</a>
                   </td>
                 </tr>
               </table>

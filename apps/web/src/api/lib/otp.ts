@@ -1,6 +1,12 @@
-import crypto from 'crypto';
+import { redis, redisPipeline } from './redis';
 
-export type OtpPurpose = 'LOGIN' | 'CHECKOUT' | 'ORDER_TRACKING' | 'ADMIN_2FA' | 'PASSWORD_RESET' | 'VERIFICATION';
+export const OTP_PURPOSES = ['LOGIN', 'CHECKOUT', 'ORDER_TRACKING', 'ADMIN_2FA', 'PASSWORD_RESET', 'VERIFICATION'] as const;
+
+export type OtpPurpose = (typeof OTP_PURPOSES)[number];
+
+export function isOtpPurpose(value: unknown): value is OtpPurpose {
+  return typeof value === 'string' && (OTP_PURPOSES as readonly string[]).includes(value);
+}
 
 export interface OtpRecord {
   code: string;
@@ -10,47 +16,128 @@ export interface OtpRecord {
   createdAt: number;
 }
 
-// In-Memory Secure OTP Store (keyed by `email:purpose`)
-const otpStore = new Map<string, OtpRecord>();
+const MAX_ATTEMPTS = 5;
+// Attempt counters are refreshed to this TTL on each verify; it only needs to
+// outlive the longest OTP expiry in use (password reset: 15 minutes).
+const ATTEMPTS_TTL_SECONDS = 30 * 60;
 
 /**
- * Generate a cryptographically secure 6-digit numeric OTP
+ * OTPs live in Redis (`cc:otp:<email>:<purpose>`) so a code stored by one edge
+ * isolate can be verified by another. The attempt counter is a separate key so
+ * it can be incremented atomically. When Redis is not configured or is down,
+ * this per-isolate Map is the fallback.
+ */
+const otpStore = new Map<string, OtpRecord>();
+
+const otpKey = (email: string, purpose: OtpPurpose) => `cc:otp:${email.toLowerCase().trim()}:${purpose}`;
+const attemptsKey = (key: string) => `${key}:attempts`;
+
+/**
+ * Generate a cryptographically secure 6-digit numeric OTP (Web Crypto, works on the edge runtime)
  */
 export function generateOtp(): string {
-  return crypto.randomInt(100000, 999999).toString();
+  const range = 900000;
+  // Rejection sampling keeps every code equally likely.
+  const limit = Math.floor(0x100000000 / range) * range;
+  const buf = new Uint32Array(1);
+  do {
+    crypto.getRandomValues(buf);
+  } while (buf[0] >= limit);
+  return String(100000 + (buf[0] % range));
 }
 
 /**
  * Store an OTP with an expiration time (default: 10 minutes)
  */
-export function storeOtp(
+export async function storeOtp(
   email: string,
   purpose: OtpPurpose,
   code: string,
   expiryMinutes = 10
-): OtpRecord {
-  const key = `${email.toLowerCase().trim()}:${purpose}`;
+): Promise<OtpRecord> {
+  const key = otpKey(email, purpose);
+  const ttlSeconds = expiryMinutes * 60;
   const record: OtpRecord = {
     code,
     purpose,
-    expiresAt: Date.now() + expiryMinutes * 60 * 1000,
+    expiresAt: Date.now() + ttlSeconds * 1000,
     attempts: 0,
     createdAt: Date.now(),
   };
 
-  otpStore.set(key, record);
+  const results = await redisPipeline([
+    ['SET', key, JSON.stringify(record), 'EX', ttlSeconds],
+    ['SET', attemptsKey(key), 0, 'EX', ttlSeconds],
+  ]);
+
+  if (results && results[0] === 'OK') {
+    otpStore.delete(key);
+  } else {
+    cleanupExpiredOtps();
+    otpStore.set(key, record);
+  }
   return record;
 }
 
 /**
  * Verify an entered OTP against the store
  */
-export function verifyOtp(
+export async function verifyOtp(
   email: string,
   purpose: OtpPurpose,
   enteredCode: string
-): { valid: boolean; reason?: string } {
-  const key = `${email.toLowerCase().trim()}:${purpose}`;
+): Promise<{ valid: boolean; reason?: string }> {
+  const key = otpKey(email, purpose);
+
+  const results = await redisPipeline([
+    ['GET', key],
+    ['INCR', attemptsKey(key)],
+    ['EXPIRE', attemptsKey(key), ATTEMPTS_TTL_SECONDS],
+  ]);
+
+  const [raw, attempts] = results || [];
+  let record: OtpRecord | null = null;
+  try {
+    record = typeof raw === 'string' ? (JSON.parse(raw) as OtpRecord) : null;
+  } catch {
+    record = null;
+  }
+
+  // Redis unavailable, or the OTP was stored in this isolate's memory while it was.
+  if (!record) {
+    return verifyInMemory(key, enteredCode);
+  }
+
+  if (Date.now() > record.expiresAt) {
+    await redis(['DEL', key, attemptsKey(key)]);
+    return { valid: false, reason: 'OTP has expired. Please request a new OTP.' };
+  }
+
+  if (typeof attempts !== 'number' || attempts > MAX_ATTEMPTS) {
+    await redis(['DEL', key, attemptsKey(key)]);
+    return { valid: false, reason: 'Too many incorrect attempts. Please request a new OTP.' };
+  }
+
+  if (record.code !== enteredCode.trim()) {
+    return {
+      valid: false,
+      reason: `Incorrect OTP. ${MAX_ATTEMPTS - attempts} attempts remaining.`,
+    };
+  }
+
+  // OTP is valid - consume it immediately. If a concurrent request already
+  // consumed it, DEL reports 0 and this one is rejected.
+  const consumed = await redisPipeline([
+    ['DEL', key],
+    ['DEL', attemptsKey(key)],
+  ]);
+  if (consumed && consumed[0] === 0) {
+    return { valid: false, reason: 'No active OTP found. Please request a new OTP.' };
+  }
+  return { valid: true };
+}
+
+function verifyInMemory(key: string, enteredCode: string): { valid: boolean; reason?: string } {
   const record = otpStore.get(key);
 
   if (!record) {
@@ -62,7 +149,7 @@ export function verifyOtp(
     return { valid: false, reason: 'OTP has expired. Please request a new OTP.' };
   }
 
-  if (record.attempts >= 5) {
+  if (record.attempts >= MAX_ATTEMPTS) {
     otpStore.delete(key);
     return { valid: false, reason: 'Too many incorrect attempts. Please request a new OTP.' };
   }
@@ -72,7 +159,7 @@ export function verifyOtp(
   if (record.code !== enteredCode.trim()) {
     return {
       valid: false,
-      reason: `Incorrect OTP. ${5 - record.attempts} attempts remaining.`,
+      reason: `Incorrect OTP. ${MAX_ATTEMPTS - record.attempts} attempts remaining.`,
     };
   }
 
@@ -82,7 +169,7 @@ export function verifyOtp(
 }
 
 /**
- * Clear expired OTP records to prevent memory leak
+ * Clear expired in-memory OTP records to prevent memory leak
  */
 export function cleanupExpiredOtps(): void {
   const now = Date.now();
