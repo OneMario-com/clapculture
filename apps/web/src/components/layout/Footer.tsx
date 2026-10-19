@@ -50,8 +50,8 @@ export function Footer() {
               <li><Link href="/shop" className="hover:text-electric-lime transition-colors">All Products</Link></li>
               <li><Link href="/collections/hoodies" className="hover:text-electric-lime transition-colors">Hoodies</Link></li>
               <li><Link href="/collections/t-shirts" className="hover:text-electric-lime transition-colors">T-Shirts</Link></li>
-              <li><Link href="/collections/bottoms" className="hover:text-electric-lime transition-colors">Bottoms</Link></li>
-              <li><Link href="/collections/accessories" className="hover:text-electric-lime transition-colors">Accessories</Link></li>
+              <li><Link href="/category/bottoms" className="hover:text-electric-lime transition-colors">Bottoms</Link></li>
+              <li><Link href="/category/headwear" className="hover:text-electric-lime transition-colors">Headwear</Link></li>
             </ul>
           </div>
 
@@ -59,9 +59,7 @@ export function Footer() {
             <h4 className="font-bold uppercase tracking-wider mb-4 md:mb-6 text-white text-xs md:text-sm 2xl:text-base">COMPANY</h4>
             <ul className="space-y-3 md:space-y-4 text-xs md:text-sm 2xl:text-base text-gray-400">
               <li><Link href="/about" className="hover:text-electric-lime transition-colors">About Us</Link></li>
-              <li><Link href="/our-story" className="hover:text-electric-lime transition-colors">Our Story</Link></li>
-              <li><Link href="/careers" className="hover:text-electric-lime transition-colors">Careers</Link></li>
-              <li><Link href="/sustainability" className="hover:text-electric-lime transition-colors">Sustainability</Link></li>
+              <li><Link href="/collections" className="hover:text-electric-lime transition-colors">Collections</Link></li>
             </ul>
           </div>
 
