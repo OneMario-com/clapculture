@@ -26,8 +26,10 @@ One-time setup in the Cloudflare dashboard (Workers & Pages → `clapculture` �
    - Build command: `npm run build`
    - Deploy command: `npm run deploy`
    - Non-production branch deploy command: `npm run upload`
-2. **Variables and Secrets** → add every variable from `.env.example`, using the
-   *Secret* type for keys and passwords. They are read at runtime, so no build
-   variables are needed.
+2. **Variables and Secrets** → add the secrets, as type *Secret*: `APPWRITE_API_KEY`,
+   `ADMIN_PASSWORD`, `JWT_SECRET`, `SMTP_PASS` (and `UPSTASH_REDIS_REST_URL` /
+   `UPSTASH_REDIS_REST_TOKEN` if used). Non-secret settings (Appwrite endpoint and
+   project, SMTP host and sender, site URL) are in `apps/web/wrangler.jsonc` under
+   `vars`; change them there, since every deploy applies that file.
 
 Manual deploy from a computer: `npx wrangler login`, then `npm run build && npm run deploy`.
