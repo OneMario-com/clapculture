@@ -14,5 +14,25 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  // Non-secret settings, applied on every deploy. Deploys used to wipe these when they were
+  // set only in the dashboard (e.g. APPWRITE_PROJECT_ID, which took the site's data down).
+  // Secrets (APPWRITE_API_KEY, ADMIN_PASSWORD, JWT_SECRET, SMTP_PASS, UPSTASH_REDIS_REST_TOKEN)
+  // stay in the dashboard as encrypted Secrets; deploys keep those.
+  "vars": {
+    "APPWRITE_ENDPOINT": "https://sgp.cloud.appwrite.io/v1",
+    "APPWRITE_PROJECT_ID": "6a7dfa97003713198186",
+    "APPWRITE_DATABASE_ID": "clapculture_db",
+    "APPWRITE_STORAGE_BUCKET_MEDIA": "media",
+    "NEXT_PUBLIC_APP_URL": "https://clapculture.com",
+    "SMTP_HOST": "smtp.gmail.com",
+    "SMTP_PORT": "465",
+    "SMTP_SECURE": "true",
+    "SMTP_USER": "clapculture.co@gmail.com",
+    "SMTP_FROM_NAME": "CLAPCULTURE",
+    "SMTP_FROM_EMAIL": "clapculture.co@gmail.com",
+    "ADMIN_NOTIFICATION_EMAIL": "clapculture.co@gmail.com"
+  },
+  // Keep any other plain-text variables added in the dashboard instead of deleting them on deploy.
+  "keep_vars": true
 }
